@@ -3,6 +3,13 @@ project("vulkan_engine")
 
 set(CMAKE_CXX_STANDARD 17)
 
+# Gradle 会对所有 ABI 传入 -DSHADER_ASSET_OUT，但只有 arm64-v8a 需要编译 shader
+# （其他 ABI 链接 stub 库）。此处先在顶层读取一次，避免 CMake 对非 arm64 ABI
+# 报 "Manually-specified variables were not used by the project" 警告。
+if(DEFINED SHADER_ASSET_OUT AND NOT SHADER_ASSET_OUT STREQUAL "")
+    set(_LUTISTA_SHADER_ASSET_OUT "${SHADER_ASSET_OUT}")
+endif()
+
 if(ANDROID_ABI STREQUAL "arm64-v8a")
 
     find_package(Vulkan REQUIRED)
@@ -22,20 +29,19 @@ if(ANDROID_ABI STREQUAL "arm64-v8a")
     endif()
     if(NOT EXISTS "${GLSLC}")
         message(FATAL_ERROR "glslc not found at ${GLSLC}. Shader compilation is required for Vulkan rendering; check NDK shader-tools.")
-        unset(GLSLC)
     else()
         message(STATUS "Found glslc: ${GLSLC}")
     endif()
 
-    set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
+    set(SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
 
     # SPIR-V 输出目录由 Gradle 通过 -DSHADER_ASSET_OUT 传入（位于 app/build/generated 下），
     # 不再写回源码树：避免生成物混入版本控制，也避免 gradlew clean 误删源码目录。
-    if(NOT DEFINED SHADER_ASSET_OUT OR SHADER_ASSET_OUT STREQUAL "")
+    if(NOT DEFINED _LUTISTA_SHADER_ASSET_OUT OR _LUTISTA_SHADER_ASSET_OUT STREQUAL "")
         message(FATAL_ERROR "SHADER_ASSET_OUT not set. Build via Gradle, which passes -DSHADER_ASSET_OUT=<dir>.")
     endif()
-    set(SPIRV_DIR ${SHADER_ASSET_OUT}/shaders)
-    file(MAKE_DIRECTORY ${SPIRV_DIR})
+    set(SPIRV_DIR "${_LUTISTA_SHADER_ASSET_OUT}/shaders")
+    file(MAKE_DIRECTORY "${SPIRV_DIR}")
 
     set(SHADERS
         unified.comp
@@ -43,21 +49,19 @@ if(ANDROID_ABI STREQUAL "arm64-v8a")
 
     set(SPIRV_OUTPUTS "")
 
-    if(GLSLC)
-        foreach(SHADER ${SHADERS})
-            set(SPIRV_OUTPUT ${SPIRV_DIR}/${SHADER}.spv)
-            add_custom_command(
-                OUTPUT ${SPIRV_OUTPUT}
-                COMMAND ${GLSLC} --target-env=vulkan1.1 -O
-                        ${SHADER_DIR}/${SHADER} -o ${SPIRV_OUTPUT}
-                DEPENDS ${SHADER_DIR}/${SHADER}
-                COMMENT "Compiling ${SHADER} -> SPIR-V"
-            )
-            list(APPEND SPIRV_OUTPUTS ${SPIRV_OUTPUT})
-        endforeach()
+    foreach(SHADER ${SHADERS})
+        set(SPIRV_OUTPUT "${SPIRV_DIR}/${SHADER}.spv")
+        add_custom_command(
+            OUTPUT "${SPIRV_OUTPUT}"
+            COMMAND "${GLSLC}" --target-env=vulkan1.1 -O
+                    "${SHADER_DIR}/${SHADER}" -o "${SPIRV_OUTPUT}"
+            DEPENDS "${SHADER_DIR}/${SHADER}"
+            COMMENT "Compiling ${SHADER} -> SPIR-V"
+        )
+        list(APPEND SPIRV_OUTPUTS ${SPIRV_OUTPUT})
+    endforeach()
 
-        add_custom_target(shaders ALL DEPENDS ${SPIRV_OUTPUTS})
-    endif()
+    add_custom_target(shaders ALL DEPENDS ${SPIRV_OUTPUTS})
 
     add_library(vulkan_engine SHARED
         vulkan_engine/VulkanEngine.cpp
@@ -69,12 +73,10 @@ if(ANDROID_ABI STREQUAL "arm64-v8a")
         jni_bridge.cpp
     )
 
-    if(GLSLC)
-        add_dependencies(vulkan_engine shaders)
-    endif()
+    add_dependencies(vulkan_engine shaders)
 
     target_include_directories(vulkan_engine PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_engine
+        "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_engine"
     )
 
     target_link_libraries(vulkan_engine
