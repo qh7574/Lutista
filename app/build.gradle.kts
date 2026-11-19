@@ -52,11 +52,6 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
-            excludes += setOf(
-                "lib/armeabi-v7a/libopencv_java5.so",
-                "lib/x86/libopencv_java5.so",
-                "lib/x86_64/libopencv_java5.so",
-            )
         }
     }
 
@@ -122,9 +117,6 @@ dependencies {
 
     // Timber
     implementation(libs.timber)
-
-    // OpenCV (arm64-v8a only via packaging excludes above) — replaced with Android-native Bitmap APIs
-    // implementation(libs.opencv)
 
     // MIUIX
     implementation(libs.miuix.ui)
