@@ -134,3 +134,12 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 }
+
+// Shader 由 CMake/glslc 在构建期生成到源码树 assets 目录，Gradle 无法感知该产物。
+// 若不显式建立依赖边，clean 后首次 assemble 的 APK 会缺失 shaders/unified.comp.spv，
+// 导致运行时 VulkanGpuEngine 加载失败、每台设备都弹「设备不支持」。
+tasks.configureEach {
+    if (name.matches(Regex("merge.*Assets"))) {
+        dependsOn(tasks.matching { it.name.matches(Regex("buildCMake.*")) })
+    }
+}

@@ -16,9 +16,9 @@ if(ANDROID_ABI STREQUAL "arm64-v8a")
 
     # glslc path: prefer Gradle-passed ANDROID_NDK, then fall back to toolchain
     if(DEFINED ANDROID_NDK AND NOT ANDROID_NDK STREQUAL "")
-        set(GLSLC "${ANDROID_NDK}/shader-tools/${ANDROID_HOST_PREBUILT_TAG}/glslc${_GLSLC_EXT}")
+        set(GLSLC "${ANDROID_NDK}/shader-tools/${ANDROID_HOST_TAG}/glslc${_GLSLC_EXT}")
     else()
-        set(GLSLC "$ENV{ANDROID_NDK_ROOT}/shader-tools/${ANDROID_HOST_PREBUILT_TAG}/glslc${_GLSLC_EXT}")
+        set(GLSLC "$ENV{ANDROID_NDK_ROOT}/shader-tools/${ANDROID_HOST_TAG}/glslc${_GLSLC_EXT}")
     endif()
     if(NOT EXISTS "${GLSLC}")
         message(WARNING "glslc not found. Shader compilation will be skipped.")
