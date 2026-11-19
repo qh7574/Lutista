@@ -49,6 +49,15 @@ android {
         buildConfig = true
     }
 
+    testOptions {
+        unitTests {
+            // 纯 JVM 单测里 android.util.Log 是空实现，默认会抛
+            // "Method d in android.util.Log not mocked"。LayoutEngine 等类直接调用了 Log.d，
+            // 因此让未 mock 的 Android API 返回默认值。
+            isReturnDefaultValues = true
+        }
+    }
+
     packaging {
         jniLibs {
             useLegacyPackaging = true
