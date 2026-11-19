@@ -21,14 +21,20 @@ if(ANDROID_ABI STREQUAL "arm64-v8a")
         set(GLSLC "$ENV{ANDROID_NDK_ROOT}/shader-tools/${ANDROID_HOST_TAG}/glslc${_GLSLC_EXT}")
     endif()
     if(NOT EXISTS "${GLSLC}")
-        message(WARNING "glslc not found. Shader compilation will be skipped.")
+        message(FATAL_ERROR "glslc not found at ${GLSLC}. Shader compilation is required for Vulkan rendering; check NDK shader-tools.")
         unset(GLSLC)
     else()
         message(STATUS "Found glslc: ${GLSLC}")
     endif()
 
     set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
-    set(SPIRV_DIR ${CMAKE_SOURCE_DIR}/../assets/shaders)
+
+    # SPIR-V 输出目录由 Gradle 通过 -DSHADER_ASSET_OUT 传入（位于 app/build/generated 下），
+    # 不再写回源码树：避免生成物混入版本控制，也避免 gradlew clean 误删源码目录。
+    if(NOT DEFINED SHADER_ASSET_OUT OR SHADER_ASSET_OUT STREQUAL "")
+        message(FATAL_ERROR "SHADER_ASSET_OUT not set. Build via Gradle, which passes -DSHADER_ASSET_OUT=<dir>.")
+    endif()
+    set(SPIRV_DIR ${SHADER_ASSET_OUT}/shaders)
     file(MAKE_DIRECTORY ${SPIRV_DIR})
 
     set(SHADERS

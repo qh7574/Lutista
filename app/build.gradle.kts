@@ -24,6 +24,7 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags("-std=c++17")
+                arguments += "-DSHADER_ASSET_OUT=${layout.buildDirectory.get().asFile.absolutePath}/generated/shaderAssets"
             }
         }
     }
@@ -56,6 +57,13 @@ android {
             // 因此让未 mock 的 Android API 返回默认值。
             isReturnDefaultValues = true
         }
+    }
+
+    sourceSets.getByName("main") {
+        // SPIR-V 由 CMake 生成到 build 目录，这里是唯一入口，APK 内仍是 assets/shaders/*.spv。
+        // 注意：AGP 9 的 SourceSet API 不接受 Provider（只接受 File/String），
+        // 且任务顺序由文件末尾的 merge*Assets dependsOn buildCMake* 显式保证。
+        assets.srcDir(File(layout.buildDirectory.get().asFile, "generated/shaderAssets"))
     }
 
     packaging {
@@ -144,9 +152,11 @@ dependencies {
     androidTestImplementation(libs.androidx.espresso.core)
 }
 
-// Shader 由 CMake/glslc 在构建期生成到源码树 assets 目录，Gradle 无法感知该产物。
-// 若不显式建立依赖边，clean 后首次 assemble 的 APK 会缺失 shaders/unified.comp.spv，
-// 导致运行时 VulkanGpuEngine 加载失败、每台设备都弹「设备不支持」。
+// Shader 由 CMake/glslc 在构建期生成到 build/generated/shaderAssets（见 sourceSets.main.assets），
+// 而 AGP 的 SourceSet API 不接受 Provider，静态 srcDir 不产生隐式任务依赖——
+// 因此下面这段 dependsOn 是 assets 合并与 native 构建之间【唯一】的顺序保证，不要删除或收紧：
+// 删掉它会导致 clean 后首次 assemble 的 APK 缺失 shaders/unified.comp.spv，
+// 运行时 VulkanGpuEngine 加载失败、每台设备都弹「设备不支持」。
 tasks.configureEach {
     if (name.matches(Regex("merge.*Assets"))) {
         dependsOn(tasks.matching { it.name.matches(Regex("buildCMake.*")) })
