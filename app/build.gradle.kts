@@ -50,15 +50,6 @@ android {
         buildConfig = true
     }
 
-    testOptions {
-        unitTests {
-            // 纯 JVM 单测里 android.util.Log 是空实现，默认会抛
-            // "Method d in android.util.Log not mocked"。LayoutEngine 等类直接调用了 Log.d，
-            // 因此让未 mock 的 Android API 返回默认值。
-            isReturnDefaultValues = true
-        }
-    }
-
     sourceSets.getByName("main") {
         // SPIR-V 由 CMake 生成到 build 目录，这里是唯一入口，APK 内仍是 assets/shaders/*.spv。
         // 注意：AGP 9 的 SourceSet API 不接受 Provider（只接受 File/String），
