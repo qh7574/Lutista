@@ -26,3 +26,8 @@ local.properties
 
 # Kotlin 编译会话缓存
 .kotlin/
+
+# 签名文件（release keystore 绝不入库）
+*.jks
+*.keystore
+keystore.properties

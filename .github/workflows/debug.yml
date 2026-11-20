@@ -1,0 +1,96 @@
+name: Debug Build
+
+# 任何 fork 提的 PR 都能跑：debug 构建不依赖任何 secret。
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+  workflow_dispatch:
+
+# 同一个 ref 只保留最新一次运行，旧的自动取消，省 runner 时间。
+concurrency:
+  group: debug-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  debug:
+    name: Assemble debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 兜底：gradlew 的历史 mode 可能不是 100755（老分支、fork、以及 Windows 上提交过的
+      # commit 都可能是 100644），Linux runner 上直接 ./gradlew 会 Permission denied，
+      # 这里显式补一次可执行位，成本为零。
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 这四个 SDK 组件的版本必须与 app/build.gradle.kts 严格一致：
+      #   compileSdk = 37 / buildToolsVersion = "37.0.0"
+      #   ndkVersion = "29.0.14206865" / externalNativeBuild.cmake.version = "4.1.2"
+      # 绝不能用 latest —— NDK 或 CMake 版本漂移会直接让 native 构建失败或产出无法加载的 .so。
+      #
+      # 注意平台包名：API 37 是「带小版本号」的平台，官方仓库里只有 platforms;android-37.0
+      # （没有 platforms;android-37，写错会直接 404/Package not found）。
+      # 依据：https://dl.google.com/android/repository/repository2-3.xml 中
+      # <remotePackage path="platforms;android-37.0"> api-level=37.0。
+      - name: Install Android SDK components
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install \
+            "platforms;android-37.0" \
+            "build-tools;37.0.0" \
+            "ndk;29.0.14206865" \
+            "cmake;4.1.2"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Compute short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest --stacktrace
+
+      - name: Assemble debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: lutista-debug-${{ steps.sha.outputs.short }}
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      # 失败时把测试报告一起传上来，便于直接在 Actions 页面看哪条用例挂了。
+      # 注意：app/build/reports/ 本身就包含 reports/tests/，只列父目录可以避免
+      # upload-artifact@v4 对重复文件的 overwrite 警告。
+      - name: Upload test and build reports (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lutista-debug-reports-${{ steps.sha.outputs.short }}
+          path: |
+            app/build/reports/
+            app/build/test-results/
+          if-no-files-found: ignore
+          retention-days: 14

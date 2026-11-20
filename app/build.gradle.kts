@@ -4,6 +4,30 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+// ============================== Release 签名 & 版本号 ==============================
+// 签名凭据全部来自环境变量（CI 由 GitHub Actions 从 Secrets 注入），
+// 本地不设这些变量时【不创建】签名配置，assembleRelease 照旧产出 app-release-unsigned.apk。
+// 这里刻意使用 providers.environmentVariable(...) 而不是 System.getenv(...)：
+// 本项目开启了 configuration cache，Provider 读取会被正确登记为 CC 输入，
+// 而 System.getenv 在配置期读取不会登记，会导致 CC 复用到错误的配置（污染/静默错误）。
+val keystoreFilePath: String? = providers.environmentVariable("KEYSTORE_FILE").orNull
+val keystoreStorePassword: String? = providers.environmentVariable("KEYSTORE_STORE_PASSWORD").orNull
+val keystoreKeyAlias: String? = providers.environmentVariable("KEYSTORE_KEY_ALIAS").orNull
+val keystoreKeyPassword: String? = providers.environmentVariable("KEYSTORE_KEY_PASSWORD").orNull
+
+// 四个变量齐备才认为「可以签名」；缺任意一个就整体跳过，不报错、不改变原有行为。
+val hasReleaseSigning: Boolean = listOf(
+    keystoreFilePath,
+    keystoreStorePassword,
+    keystoreKeyAlias,
+    keystoreKeyPassword
+).all { !it.isNullOrBlank() }
+
+// 版本号可由 CI 覆盖：./gradlew assembleRelease -PversionCode=7 -PversionName=1.0.1
+// 不传时保持默认 1 / "1.0"，与改动前完全一致。
+val releaseVersionCode: Int = providers.gradleProperty("versionCode").map(String::toInt).orNull ?: 1
+val releaseVersionName: String = providers.gradleProperty("versionName").orNull ?: "1.0"
+
 android {
     namespace = "cn.alittlecookie.lutista"
     compileSdk = 37
@@ -12,8 +36,8 @@ android {
         applicationId = "cn.alittlecookie.lutista"
         minSdk = 29
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = releaseVersionCode
+        versionName = releaseVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -29,6 +53,18 @@ android {
         }
     }
 
+    // 凭据来自环境变量，本地不设则跳过签名（不创建该 signingConfig，也不挂到 release 上）。
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(requireNotNull(keystoreFilePath))
+                storePassword = keystoreStorePassword
+                keyAlias = keystoreKeyAlias
+                keyPassword = keystoreKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -37,6 +73,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

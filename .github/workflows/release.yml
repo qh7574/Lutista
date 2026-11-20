@@ -1,0 +1,222 @@
+name: Release Build
+
+# 说明：本流程只负责「构建 + 验签 + 产出 artifact」，不会自动创建 GitHub Release。
+# 如果将来需要直接发 Release，在此 job 末尾追加一步：
+#   - uses: softprops/action-gh-release@v2
+#     with:
+#       files: Lutista-*-release.apk
+# 并把顶部的 permissions 改成 `contents: write`（当前只给了 contents: read）。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      versionCode:
+        description: '可选：覆盖 versionCode（留空则用 Gradle 默认值 1）'
+        required: false
+        default: ''
+      versionName:
+        description: '可选：覆盖 versionName（留空则用 Gradle 默认值 1.0）'
+        required: false
+        default: ''
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false   # 发版不互相取消：并发打 tag 时排队执行，避免中断已在跑的签名构建
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Assemble signed release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 兜底：gradlew 的历史 mode 可能不是 100755（老分支、fork、以及 Windows 上提交过的
+      # commit 都可能是 100644），Linux runner 上直接 ./gradlew 会 Permission denied，
+      # 这里显式补一次可执行位，成本为零。
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 与 app/build.gradle.kts 严格一致：compileSdk 37 / buildTools 37.0.0
+      # / ndkVersion 29.0.14206865 / cmake 4.1.2。不要改成 latest。
+      # 平台包名是 platforms;android-37.0（API 37 带小版本号，不存在 platforms;android-37）。
+      - name: Install Android SDK components
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install \
+            "platforms;android-37.0" \
+            "build-tools;37.0.0" \
+            "ndk;29.0.14206865" \
+            "cmake;4.1.2"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # 从 secret 解码 release keystore 到 runner 临时目录。
+      # 安全要求：绝不 echo / cat base64 或 keystore 内容。
+      - name: Decode release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_STORE_PASSWORD: ${{ secrets.KEYSTORE_STORE_PASSWORD }}
+          KEYSTORE_KEY_ALIAS: ${{ secrets.KEYSTORE_KEY_ALIAS }}
+          KEYSTORE_KEY_PASSWORD: ${{ secrets.KEYSTORE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # 前置校验：先把「secret 没配」这种情况明确报出来，否则后面的报错信息很难懂。
+          MISSING=0
+          for name in KEYSTORE_BASE64 KEYSTORE_STORE_PASSWORD KEYSTORE_KEY_ALIAS KEYSTORE_KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Secret ${name} is empty or not configured for this repository."
+              MISSING=1
+            fi
+          done
+          if [ "${MISSING}" -ne 0 ]; then
+            exit 1
+          fi
+
+          KEYSTORE_PATH="${RUNNER_TEMP}/release.keystore"
+          printf '%s' "${KEYSTORE_BASE64}" | base64 -d > "${KEYSTORE_PATH}"
+          chmod 600 "${KEYSTORE_PATH}"
+          if [ ! -s "${KEYSTORE_PATH}" ]; then
+            echo "::error::Decoded keystore at ${KEYSTORE_PATH} is empty — KEYSTORE_BASE64 is probably corrupt."
+            exit 1
+          fi
+          echo "Keystore decoded OK: ${KEYSTORE_PATH} ($(stat -c%s "${KEYSTORE_PATH}") bytes)"
+
+      # 签名凭据通过环境变量注入，由 app/build.gradle.kts 里的 providers.environmentVariable 读取。
+      # 版本号三级优先级：手动输入的 inputs > vX.Y.Z tag 推导 > Gradle 默认值（1 / "1.0"）。
+      # 必须从 tag 推导的原因：push tag 触发时 inputs 为空，若不推导 versionCode 会恒为 1，
+      # 覆盖安装与上架都会被拒。
+      - name: Assemble release APK
+        env:
+          KEYSTORE_FILE: ${{ runner.temp }}/release.keystore
+          KEYSTORE_STORE_PASSWORD: ${{ secrets.KEYSTORE_STORE_PASSWORD }}
+          KEYSTORE_KEY_ALIAS: ${{ secrets.KEYSTORE_KEY_ALIAS }}
+          KEYSTORE_KEY_PASSWORD: ${{ secrets.KEYSTORE_KEY_PASSWORD }}
+          INPUT_VERSION_CODE: ${{ inputs.versionCode }}
+          INPUT_VERSION_NAME: ${{ inputs.versionName }}
+          TAG_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          VERSION_CODE=""
+          VERSION_NAME=""
+          VERSION_SOURCE="default"
+
+          if [ -n "${INPUT_VERSION_CODE:-}" ] || [ -n "${INPUT_VERSION_NAME:-}" ]; then
+            VERSION_CODE="${INPUT_VERSION_CODE:-}"
+            VERSION_NAME="${INPUT_VERSION_NAME:-}"
+            VERSION_SOURCE="inputs"
+          elif [ "${EVENT_NAME:-}" = "push" ] && [[ "${TAG_NAME:-}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            MAJOR="${BASH_REMATCH[1]}"
+            MINOR="${BASH_REMATCH[2]}"
+            PATCH="${BASH_REMATCH[3]}"
+            VERSION_NAME="${TAG_NAME#v}"
+            # 10# 前缀强制十进制：否则 08 / 09 会被 bash 当成非法八进制而报错
+            VERSION_CODE=$(( 10#${MAJOR} * 10000 + 10#${MINOR} * 100 + 10#${PATCH} ))
+            VERSION_SOURCE="tag:${TAG_NAME}"
+          elif [ "${EVENT_NAME:-}" = "push" ]; then
+            # 只有 tag push 却没匹配到 vX.Y.Z 才告警；手动触发且未填 inputs 属正常情况，不打扰。
+            echo "::warning::tag '${TAG_NAME:-}' 不符合 vX.Y.Z 格式，回退 Gradle 默认版本号（1 / 1.0）。"
+          fi
+
+          EXTRA_ARGS=()
+          if [ -n "${VERSION_CODE}" ]; then
+            EXTRA_ARGS+=("-PversionCode=${VERSION_CODE}")
+          fi
+          if [ -n "${VERSION_NAME}" ]; then
+            EXTRA_ARGS+=("-PversionName=${VERSION_NAME}")
+          fi
+
+          echo "Version: code=${VERSION_CODE:-<gradle default 1>} name=${VERSION_NAME:-<gradle default 1.0>} source=${VERSION_SOURCE}"
+          ./gradlew assembleRelease --stacktrace "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
+
+      # 防呆核心：如果签名配置因故没生效，产物会是 app-release-unsigned.apk。
+      # 这里显式断言并要求 apksigner 验签通过，避免「流水线绿但包是未签名的」。
+      - name: Verify APK signature
+        run: |
+          set -euo pipefail
+          RELEASE_DIR="app/build/outputs/apk/release"
+          APK="${RELEASE_DIR}/app-release.apk"
+          if [ ! -f "${APK}" ]; then
+            echo "::error::Expected signed APK at ${APK} but it does not exist."
+            echo "--- contents of ${RELEASE_DIR} ---"
+            ls -la "${RELEASE_DIR}" || true
+            if [ -f "${RELEASE_DIR}/app-release-unsigned.apk" ]; then
+              echo "::error::Found app-release-unsigned.apk instead — the release signingConfig was NOT applied."
+            fi
+            exit 1
+          fi
+
+          SDK_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          APKSIGNER="${SDK_HOME}/build-tools/37.0.0/apksigner"
+          if [ ! -x "${APKSIGNER}" ]; then
+            echo "::error::apksigner not found or not executable at ${APKSIGNER} (SDK_HOME=${SDK_HOME})."
+            exit 1
+          fi
+
+          "${APKSIGNER}" verify --verbose --print-certs "${APK}"
+
+      # 从 AGP 生成的 output-metadata.json 读真实版本号（比手工拼 -P 参数更可靠：
+      # tag push 场景下没有 -P 输入，只能从产物里读）。
+      - name: Read built version info
+        id: meta
+        run: |
+          set -euo pipefail
+          META="app/build/outputs/apk/release/output-metadata.json"
+          if [ ! -f "${META}" ]; then
+            echo "::error::${META} not found."
+            exit 1
+          fi
+          VERSION_NAME="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["elements"][0]["versionName"])' "${META}")"
+          VERSION_CODE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["elements"][0]["versionCode"])' "${META}")"
+          echo "versionName=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          echo "versionCode=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "Built APK versionName=${VERSION_NAME} versionCode=${VERSION_CODE}"
+
+      - name: Rename APK to readable name
+        env:
+          VERSION_NAME: ${{ steps.meta.outputs.versionName }}
+        run: |
+          set -euo pipefail
+          SRC="app/build/outputs/apk/release/app-release.apk"
+          DEST="Lutista-${VERSION_NAME}-release.apk"
+          cp "${SRC}" "${DEST}"
+          ls -la "${DEST}"
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: lutista-release-${{ steps.meta.outputs.versionName }}-${{ steps.meta.outputs.versionCode }}
+          path: Lutista-*-release.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # R8 混淆映射：还原线上崩溃堆栈的唯一依据，必须和 APK 一起留存。
+      - name: Upload R8 mapping file
+        uses: actions/upload-artifact@v4
+        with:
+          name: lutista-release-mapping-${{ steps.meta.outputs.versionName }}-${{ steps.meta.outputs.versionCode }}
+          path: app/build/outputs/mapping/release/mapping.txt
+          # 必须 error：mapping.txt 是还原线上崩溃堆栈的唯一依据，
+          # 静默缺失会让流水线「绿但无法解混淆」，比直接红更危险。
+          if-no-files-found: error
+          retention-days: 30
