@@ -1,0 +1,75 @@
+Lutista
+Copyright 2026 qh7574
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+--------------------------------------------------------------------------------
+第三方组件
+--------------------------------------------------------------------------------
+
+本应用在构建或运行时包含下列第三方组件，均按其各自的许可证分发：
+
+  AndroidX / Jetpack Compose / Room / DocumentFile
+      Copyright The Android Open Source Project
+      Apache License 2.0
+
+  MIUIX (HyperOS 风格 UI 组件库)
+      Copyright Xiaomi
+      Apache License 2.0
+
+  OpenCV 4.13.0（仅用于图像 I/O 与 Mat 转换）
+      Copyright OpenCV Foundation
+      Apache License 2.0
+
+  Kotlin / kotlinx.coroutines
+      Copyright JetBrains s.r.o.
+      Apache License 2.0
+
+  Koin
+      Copyright Kotlin Foundation / Insert Koin
+      Apache License 2.0
+
+  Coil
+      Copyright Coil Contributors
+      Apache License 2.0
+
+  Timber
+      Copyright Jake Wharton
+      Apache License 2.0
+
+各项目的完整许可证文本可向其官方发布源获取。若某个组件自带 NOTICE 文件，
+其内容在同等意义上并入本文件。
+
+--------------------------------------------------------------------------------
+LUT 素材（不适用 Apache-2.0）
+--------------------------------------------------------------------------------
+
+app/src/main/assets/filters/ 目录下的 .cube 文件为色彩查找表素材，
+**不在本仓库根目录 LICENSE（Apache License 2.0）的授权范围内**。
+其权利归各自的原始作者所有，与本项目代码的授权相互独立。
+
+  来源：小红书 @JC's here（以下简称"原作者"）
+
+      Flike-ACROS.cube              Flike-ASTIA.cube
+      Flike-ClassicChrome.cube      Flike-ClassicNegative.cube
+      Flike-Eterna.cube             Flike-EternaBleachBypass.cube
+      Flike-PROVIA.cube             Flike-ProNegStd.cube
+      Flike-REALA.cube              Flike-VELVIA.cube
+      GR-BleachBypass.cube          GR-HiContrastBW.cube
+      GR-Negative.cube              GR-Positive.cube
+      GR-RetroBlue.cube             JC-Negative.cube
+      JC-Positive.cube
+
+      共 17 个文件。著作权归原作者所有，本项目不对其作出任何再授权，
+      亦不因随本应用分发而主张任何权利。若需在衍生作品或商业产品中
+      使用、再分发这些文件，请自行向原作者取得授权。
+
+  来源：本项目生成
+
+      CyanOrganic.cube
+      VLogto709.cube
+      sRGBto709.cube
+
+      共 3 个文件。与本项目代码一同按 Apache License 2.0 授权。
+
+凡未在上述两处列出的素材，均不属于本项目的授权标的。

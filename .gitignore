@@ -31,3 +31,6 @@ local.properties
 *.jks
 *.keystore
 keystore.properties
+
+# 本地 AI 协作数据与工作日志（项目私有，不入库）
+.workbuddy/
