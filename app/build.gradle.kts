@@ -192,7 +192,9 @@ dependencies {
     implementation(libs.miuix.blur)
     implementation(libs.miuix.preference)
     implementation(libs.miuix.icons)
-    implementation(libs.miuix.navigation3.ui)
+    // miuix 0.9.4 移除了 miuix-navigation3-ui；本项目的 NavDisplay 用的是
+    // androidx.navigation3.ui（此前由该模块传递带入），故改为直接依赖。
+    implementation(libs.navigation3.ui)
 
     // Reorderable
     implementation(libs.reorderable)
