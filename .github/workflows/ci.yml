@@ -1,6 +1,13 @@
-name: Debug Build
+name: CI Build
 
-# 任何 fork 提的 PR 都能跑：debug 构建不依赖任何 secret。
+# 每次 push 到 master/main、以及任何 PR 都跑。
+# 产出的是 perf 变体（R8 + 资源压缩，行为等同 release），但用 debug 密钥签名，
+# 所以【不依赖任何 secret】—— fork 提的 PR 也能跑、也能拿到可安装的包。
+#
+# 为什么不是 assembleDebug：debug 变体 isDebuggable=true 且不跑 R8，
+# Compose / MIUIX 的启动与滚动手感明显劣化，用它提测会得到错误结论。
+# 为什么不是 assembleRelease：那需要 KEYSTORE_* 四个 secret，fork PR 直接红，
+# 而且等于把正式签名密钥的暴露面从「打 tag 时」扩大到「每次 push」。
 on:
   push:
     branches:
@@ -11,15 +18,15 @@ on:
 
 # 同一个 ref 只保留最新一次运行，旧的自动取消，省 runner 时间。
 concurrency:
-  group: debug-build-${{ github.workflow }}-${{ github.ref }}
+  group: ci-build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  debug:
-    name: Assemble debug APK
+  ci:
+    name: Assemble minified APK
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -78,22 +85,45 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # perf 变体用 debug 密钥签名，而 debug keystore 是 AGP 首次构建时随机生成的：
+      # 如果每个 runner 各生成一份，两次 CI 的包签名不同，覆盖安装会被拒（只能卸载，
+      # 卸载 = 用户滤镜数据全丢）。缓存这份 keystore，让所有 CI 产物签名恒定。
+      - name: Cache debug keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: android-debug-keystore-v1
+
       - name: Compute short SHA
         id: sha
         run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
+      # AGP 9 只为 testBuildType（默认 debug）生成单测任务，没有 testPerfUnitTest，
+      # 所以这里保持 testDebugUnitTest —— 单测是纯 JVM 逻辑，跑哪个变体的类都一样。
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest --stacktrace
 
-      - name: Assemble debug APK
-        run: ./gradlew assembleDebug --stacktrace
+      # 签名后产物是 app-perf.apk；若 debug 密钥配置因为任何原因没生效，
+      # AGP 只会产出 app-perf-unsigned.apk，下面的 upload 会以「找不到文件」直接红，
+      # 避免出现「流水线绿但包装不上」。
+      - name: Assemble minified APK
+        run: ./gradlew assemblePerf --stacktrace
 
-      - name: Upload debug APK
+      - name: Upload minified APK
         uses: actions/upload-artifact@v4
         with:
-          name: lutista-debug-${{ steps.sha.outputs.short }}
-          path: app/build/outputs/apk/debug/*.apk
+          name: lutista-perf-${{ steps.sha.outputs.short }}
+          path: app/build/outputs/apk/perf/app-perf.apk
           if-no-files-found: error
+          retention-days: 14
+
+      # R8 mapping 是还原这个包崩溃堆栈的唯一依据，跟着包一起传。
+      - name: Upload R8 mapping file
+        uses: actions/upload-artifact@v4
+        with:
+          name: lutista-perf-mapping-${{ steps.sha.outputs.short }}
+          path: app/build/outputs/mapping/perf/mapping.txt
+          if-no-files-found: ignore
           retention-days: 14
 
       # 失败时把测试报告一起传上来，便于直接在 Actions 页面看哪条用例挂了。
@@ -103,7 +133,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: lutista-debug-reports-${{ steps.sha.outputs.short }}
+          name: lutista-ci-reports-${{ steps.sha.outputs.short }}
           path: |
             app/build/reports/
             app/build/test-results/

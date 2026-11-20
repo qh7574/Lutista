@@ -77,6 +77,19 @@ android {
                 signingConfig = signingConfigs.getByName("release")
             }
         }
+
+        // 提测变体：运行时行为与 release 完全一致（R8 + 资源压缩、isDebuggable=false），
+        // 但用 debug 密钥签名，因此【不需要任何 secret】，fork / PR 也能构建出可安装包。
+        //
+        // 存在的理由：debug 变体 isDebuggable=true 且不跑 R8，Compose/MIUIX 的启动与滚动手感
+        // 明显劣化，无法用来判断真实体验。CI 每次 push 出的包必须是这一档。
+        // 注意：不要给这里加 applicationIdSuffix，否则装出来会是另一个包名，无法覆盖测试。
+        create("perf") {
+            initWith(getByName("release"))
+            // initWith(release) 会连 signingConfig 一起复制过来，这里必须显式覆盖回 debug 密钥，
+            // 否则 perf 构建也会去要 KEYSTORE_* 环境变量。
+            signingConfig = signingConfigs.getByName("debug")
+        }
     }
 
     compileOptions {
