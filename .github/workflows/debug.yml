@@ -38,23 +38,38 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      # 这四个 SDK 组件的版本必须与 app/build.gradle.kts 严格一致：
+      # runner 镜像自带 Android SDK（ANDROID_HOME=/usr/local/lib/android/sdk）。
+      # 不要改回 android-actions/setup-android：它的 v3 会执行 `sdkmanager tools`，
+      # 而 `tools` 包已从官方仓库移除，会直接 Failed to find package 'tools' 退出 1。
+      # 这里直接找到镜像里的 sdkmanager（版本目录名为 16.0 之类的数字，不是 latest）。
+      #
+      # 四个组件的版本必须与 app/build.gradle.kts 严格一致：
       #   compileSdk = 37 / buildToolsVersion = "37.0.0"
       #   ndkVersion = "29.0.14206865" / externalNativeBuild.cmake.version = "4.1.2"
-      # 绝不能用 latest —— NDK 或 CMake 版本漂移会直接让 native 构建失败或产出无法加载的 .so。
-      #
-      # 注意平台包名：API 37 是「带小版本号」的平台，官方仓库里只有 platforms;android-37.0
-      # （没有 platforms;android-37，写错会直接 404/Package not found）。
-      # 依据：https://dl.google.com/android/repository/repository2-3.xml 中
-      # <remotePackage path="platforms;android-37.0"> api-level=37.0。
+      # 绝不能用 latest —— NDK 或 CMake 版本漂移会让 native 构建失败或产出无法加载的 .so。
+      # 平台包名是 platforms;android-37.0（API 37 带小版本号，不存在 platforms;android-37）。
       - name: Install Android SDK components
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager --install \
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "${SDK}" ]; then
+            echo "::error::Android SDK not found at ${SDK}"
+            exit 1
+          fi
+          SDKMANAGER=""
+          for candidate in "${SDK}"/cmdline-tools/*/bin/sdkmanager; do
+            if [ -x "${candidate}" ]; then SDKMANAGER="${candidate}"; fi
+          done
+          if [ -z "${SDKMANAGER}" ]; then
+            echo "::error::sdkmanager not found under ${SDK}/cmdline-tools/*/bin"
+            ls -la "${SDK}" "${SDK}/cmdline-tools" || true
+            exit 1
+          fi
+          echo "Using sdkmanager: ${SDKMANAGER}"
+          echo "${SDK}/platform-tools" >> "$GITHUB_PATH"
+          echo "$(dirname "${SDKMANAGER}")" >> "$GITHUB_PATH"
+          yes | "${SDKMANAGER}" --sdk_root="${SDK}" --licenses > /dev/null 2>&1 || true
+          "${SDKMANAGER}" --sdk_root="${SDK}" --install \
             "platforms;android-37.0" \
             "build-tools;37.0.0" \
             "ndk;29.0.14206865" \
