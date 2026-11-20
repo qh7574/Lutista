@@ -17,7 +17,7 @@ class BuiltinFilterManager(
 ) {
     companion object {
         private const val TAG = "BuiltinFilterManager"
-        const val CURRENT_BUILTIN_FILTER_VERSION = 1
+        const val CURRENT_BUILTIN_FILTER_VERSION = 2
         private const val FILTERS_DIR = "filters"
         private const val ASSETS_FILTERS_DIR = "filters"
     }
