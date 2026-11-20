@@ -6,6 +6,7 @@ import cn.alittlecookie.lutista.data.database.entity.FilterEntity
 import cn.alittlecookie.lutista.data.model.FloatPoint
 import cn.alittlecookie.lutista.data.model.LutData
 import cn.alittlecookie.lutista.data.repository.FilterRepository
+import cn.alittlecookie.lutista.domain.engine.ColorPipelineMath
 import cn.alittlecookie.lutista.manager.LogManager
 import cn.alittlecookie.lutista.util.CurveInterpolator
 import cn.alittlecookie.lutista.util.FilterConfigJson
@@ -195,8 +196,7 @@ class ExportFilterUseCase(
                     }
 
                     if (filter.exposure != 0f) {
-                        val factor = Math.pow(2.0, filter.exposure / 10.0).toFloat()
-                        color = floatArrayOf(color[0] * factor, color[1] * factor, color[2] * factor)
+                        color = applyExposureLinear(color, filter.exposure / 10f)
                     }
 
                     if (filter.contrast != 0f) {
@@ -210,8 +210,11 @@ class ExportFilterUseCase(
 
                     if (filter.highlights != 0f || filter.shadows != 0f) {
                         val lum = color[0] * 0.299f + color[1] * 0.587f + color[2] * 0.114f
-                        val highlightMask = if (lum > 0.5f) (lum - 0.5f) / 0.5f else 0f
-                        val shadowMask = if (lum <= 0.5f) (0.5f - lum) / 0.5f else 0f
+                        // Must match unified.comp exactly: smoothstep masks, not
+                        // linear ramps, otherwise the exported .cube no longer
+                        // reproduces the GPU preview.
+                        val highlightMask = smoothStep(0.5f, 1f, lum)
+                        val shadowMask = 1f - smoothStep(0f, 0.5f, lum)
                         val adj = (filter.highlights / 100f) * highlightMask * 0.3f +
                                   (filter.shadows / 100f) * shadowMask * 0.3f
                         color = floatArrayOf(color[0] + adj, color[1] + adj, color[2] + adj)
@@ -228,13 +231,19 @@ class ExportFilterUseCase(
                     }
 
                     if (filter.colorTemperature != 0f) {
-                        val adjustment = filter.colorTemperature / 200f
-                        color = floatArrayOf(color[0] + adjustment, color[1], color[2] - adjustment)
+                        // Chromatic gain (see unified.comp step 7): an additive
+                        // offset would tint pure black and lift the black point.
+                        val adj = filter.colorTemperature / 200f
+                        color = floatArrayOf(
+                            color[0] * Math.max(1f + adj, 0f),
+                            color[1],
+                            color[2] * Math.max(1f - adj, 0f)
+                        )
                     }
 
                     if (filter.tint != 0f) {
-                        val adjustment = filter.tint / 200f
-                        color = floatArrayOf(color[0], color[1] + adjustment, color[2])
+                        val adj = filter.tint / 200f
+                        color = floatArrayOf(color[0], color[1] * Math.max(1f + adj, 0f), color[2])
                     }
 
                     // Curve: White (master) then per-channel
@@ -266,7 +275,7 @@ class ExportFilterUseCase(
 
                     // LCH
                     if (lchEnabled) {
-                        val lin = srgbToLinear(color)
+                        val lin = ColorPipelineMath.srgbToLinear(color)
                         val oklab = linearToOklab(lin)
                         val L = oklab[0]
                         val C = Math.sqrt((oklab[1] * oklab[1] + oklab[2] * oklab[2]).toDouble()).toFloat()
@@ -306,7 +315,7 @@ class ExportFilterUseCase(
                             if (newH >= 6.28318f) newH -= 6.28318f
                             val newOklab = floatArrayOf(newL, newC * Math.cos(newH.toDouble()).toFloat(), newC * Math.sin(newH.toDouble()).toFloat())
                             val newLin = oklabToLinear(newOklab)
-                            color = linearToSrgb(floatArrayOf(newLin[0].coerceIn(0f, 1f), newLin[1].coerceIn(0f, 1f), newLin[2].coerceIn(0f, 1f)))
+                            color = ColorPipelineMath.linearToSrgb(floatArrayOf(newLin[0].coerceIn(0f, 1f), newLin[1].coerceIn(0f, 1f), newLin[2].coerceIn(0f, 1f)))
                         }
                     }
 
@@ -336,15 +345,30 @@ class ExportFilterUseCase(
         return lut
     }
 
-    private fun srgbToLinear(c: FloatArray): FloatArray {
-        fun f(v: Float): Float = if (v <= 0.04045f) v / 12.92f else Math.pow(((v + 0.055f) / 1.055f).toDouble(), 2.4).toFloat()
-        return floatArrayOf(f(c[0]), f(c[1]), f(c[2]))
+    /**
+     * Photographic exposure applied in linear light, followed by a soft
+     * highlight shoulder.
+     *
+     * Thin adapter: the formula itself lives in [ColorPipelineMath.applyExposure]
+     * so that the CPU path (.cube export) and the GPU path (`unified.comp`'s
+     * `applyExposure()`) cannot drift apart. Any change there MUST be mirrored
+     * in the shader, otherwise the exported .cube stops matching the preview.
+     *
+     * @param color display-encoded sRGB colour, each component expected in [0,1].
+     * @param ev    exposure in stops (the stored `FilterConfig.exposure / 10`).
+     * @return display-encoded sRGB colour in [0,1].
+     */
+    private fun applyExposureLinear(color: FloatArray, ev: Float): FloatArray {
+        return ColorPipelineMath.applyExposure(color, ev)
     }
 
-    private fun linearToSrgb(c: FloatArray): FloatArray {
-        fun f(v: Float): Float = if (v <= 0.0031308f) v * 12.92f else (1.055f * Math.pow(v.toDouble(), 1.0 / 2.4).toFloat() - 0.055f)
-        return floatArrayOf(f(c[0]), f(c[1]), f(c[2]))
+    /** GLSL `smoothstep`, see [ColorPipelineMath.smoothStep]. */
+    private fun smoothStep(edge0: Float, edge1: Float, x: Float): Float {
+        return ColorPipelineMath.smoothStep(edge0, edge1, x)
     }
+
+    // sRGB <-> linear light conversions live in [ColorPipelineMath] only; this
+    // file used to carry a third, byte-identical copy of the transfer functions.
 
     private fun linearToOklab(c: FloatArray): FloatArray {
         val l = 0.4122214708f * c[0] + 0.5363325363f * c[1] + 0.0514459929f * c[2]

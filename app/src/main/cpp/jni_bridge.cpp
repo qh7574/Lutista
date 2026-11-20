@@ -85,7 +85,8 @@ static void nativeUploadLut(JNIEnv* env, jobject thiz, jlong handle,
 }
 
 // nativeUploadCurves:
-//   curveData: FloatArray (1024 floats)
+//   curveData: FloatArray (1028 floats: R 0-255, G 256-511, B 512-767,
+//              W 768-1023, enable sentinels 1024-1027)
 static void nativeUploadCurves(JNIEnv* env, jobject thiz, jlong handle,
                                jfloatArray curveData) {
     auto* engine = reinterpret_cast<VulkanEngine*>(handle);
@@ -97,7 +98,9 @@ static void nativeUploadCurves(JNIEnv* env, jobject thiz, jlong handle,
 
 // nativeProcessImage:
 //   imageData: ByteArray (RGBA8, length = width * height * 4)
-//   params:    FloatArray (50 floats: filter params + LCH + enable flags)
+//   params:    FloatArray (57 floats, must match ImageProcessingEngine.buildGpuParams;
+//              width/height are passed as separate JNI arguments and are NOT
+//              part of this array)
 //   Returns:   ByteArray (RGBA8 result) or null on failure
 static jbyteArray nativeProcessImage(JNIEnv* env, jobject thiz, jlong handle,
                                       jbyteArray imageData, jint width, jint height,
@@ -109,7 +112,8 @@ static jbyteArray nativeProcessImage(JNIEnv* env, jobject thiz, jlong handle,
     jbyte* data = env->GetByteArrayElements(imageData, nullptr);
     jfloat* paramArr = env->GetFloatArrayElements(params, nullptr);
 
-    // Build FilterParams from the float array (56 floats)
+    // Build FilterParams from the float array (57 floats; width/height come
+    // from the jint arguments)
     FilterParams fp{};
     int idx = 0;
     fp.lutStrength         = paramArr[idx++];

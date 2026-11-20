@@ -14,7 +14,10 @@
 #include <string>
 
 // Must match the shader's uniform block layout exactly.
-// Total: 26 original + 24 LCH + 2 enable + 6 grain extra = 58 fields * 4 = 232 bytes.
+// All members are 4-byte scalars (float / int) and there is no array, so std140
+// lays them out consecutively without padding.
+// Total: 26 base (21 float + 5 int) + 24 LCH + 2 enable + 7 extended grain
+//        = 59 fields * 4 bytes = 236 bytes.
 struct FilterParams {
     float lutStrength;         // 0
     float lut2Strength;        // 1

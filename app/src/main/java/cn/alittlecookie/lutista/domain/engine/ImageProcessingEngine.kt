@@ -14,6 +14,7 @@ import cn.alittlecookie.lutista.util.LutParser
 import cn.alittlecookie.lutista.watermark.model.Scene
 import cn.alittlecookie.lutista.watermark.renderer.WatermarkProcessor
 import java.nio.ByteBuffer
+import kotlin.math.pow
 
 class ImageProcessingEngine(
     private val logger: LogManager,
@@ -33,6 +34,7 @@ class ImageProcessingEngine(
     @Volatile private var lastLutSize2: Int = 0
     @Volatile private var lut1Uploaded = false
     @Volatile private var lut2Uploaded = false
+    @Volatile private var lastLoggedEv = Float.NaN
 
     fun processImageGpuFromBytes(
         rgbaBytes: ByteArray, width: Int, height: Int, filter: FilterConfig
@@ -191,6 +193,36 @@ class ImageProcessingEngine(
         return lut
     }
 
+    /**
+     * Deterministic grain seed for the shader's `random()` / `gaussianNoise()`.
+     *
+     * The seed used to be `System.currentTimeMillis() % 1000`, i.e. it changed on
+     * every frame: the grain pattern visibly boiled while dragging any slider and
+     * could never match between the preview and the full resolution export.
+     *
+     * The seed is derived only from the **spatial** grain settings, so that
+     * (a) preview and export render the identical pattern, and (b) changing an
+     * amplitude-only knob (global strength, per-tone strength ratios) does not
+     * reshuffle the pattern under the user's eyes.
+     *
+     * @param grain the filter's grain configuration.
+     * @return seed in `[0, 1)`.
+     */
+    private fun grainSeed(grain: cn.alittlecookie.lutista.data.model.GrainConfig): Float {
+        var h = grain.grainSize.hashCode()
+        h = 31 * h + grain.shadowSizeRatio.hashCode()
+        h = 31 * h + grain.midtoneSizeRatio.hashCode()
+        h = 31 * h + grain.highlightSizeRatio.hashCode()
+        h = 31 * h + grain.shadowThreshold.hashCode()
+        h = 31 * h + grain.highlightThreshold.hashCode()
+        h = 31 * h + grain.redChannelRatio.hashCode()
+        h = 31 * h + grain.blueChannelRatio.hashCode()
+        h = 31 * h + grain.channelCorrelation.hashCode()
+        h = 31 * h + grain.colorPreservation.hashCode()
+        // `and 0x7FFFFFFF` instead of Math.abs() so Int.MIN_VALUE stays positive.
+        return ((h and 0x7FFFFFFF) % 1000).toFloat() / 1000f
+    }
+
     private fun buildGpuParams(filter: FilterConfig): FloatArray {
         val params = FloatArray(57)
         var idx = 0
@@ -199,7 +231,14 @@ class ImageProcessingEngine(
         val globalLutSize = settingsManager.getLutPrecisionSync().toFloat()
         params[idx++] = globalLutSize
         params[idx++] = globalLutSize
-        params[idx++] = filter.exposure / 10f
+        // 曝光滑杆存的是 EV*10，这里换算成真正的档位后交给 shader（gain = 2^EV）。
+        // 打一条只在数值变化时输出的日志，方便用户回传的 logcat 里直接看到实际档位。
+        val exposureEv = filter.exposure / 10f
+        if (exposureEv != lastLoggedEv) {
+            lastLoggedEv = exposureEv
+            logger.d(TAG, "exposure: slider=${filter.exposure} ev=$exposureEv gain=${2f.pow(exposureEv)}")
+        }
+        params[idx++] = exposureEv
         params[idx++] = filter.contrast
         params[idx++] = filter.highlights
         params[idx++] = filter.shadows
@@ -208,7 +247,7 @@ class ImageProcessingEngine(
         params[idx++] = filter.tint
         params[idx++] = filter.vignetteStrength
         params[idx++] = filter.grainConfig.globalStrength
-        params[idx++] = (System.currentTimeMillis() % 1000).toFloat() / 1000f
+        params[idx++] = grainSeed(filter.grainConfig)
         params[idx++] = filter.grainConfig.shadowThreshold / 255f
         params[idx++] = filter.grainConfig.highlightThreshold / 255f
         params[idx++] = filter.grainConfig.shadowGrainRatio

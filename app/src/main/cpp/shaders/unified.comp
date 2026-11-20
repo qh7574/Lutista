@@ -64,6 +64,47 @@ vec3 srgbToLinear(vec3 s) {
 vec3 linearToSrgb(vec3 l) {
     return mix(l * 12.92, 1.055 * pow(l, vec3(1.0/2.4)) - 0.055, step(0.0031308, l));
 }
+// Photographic exposure: pure gain in *linear* light, followed by a film-style
+// highlight roll-off (extended Reinhard) whose white point is pinned to the
+// exposure gain.
+//   srgb : display-encoded (non-linear sRGB) colour, expected in [0,1]
+//   ev   : exposure in stops (Kotlin stores exposure as EV * 10, so this is
+//          sliderValue / 10)
+//
+// Why not just `lin *= exp2(ev)`?
+//   The gain itself is correct (that *is* one stop), but on an 8-bit SDR image a
+//   pure gain clips everything above sRGB 0.73 at +1 EV, so a normal photo turns
+//   into a flat white sheet after a small slider move. Editing apps that feel
+//   "right" (Lightroom, Capture One) apply the gain and then run the result
+//   through a film curve, which is why their +1 EV brightens the mid-tones but
+//   keeps highlight detail.
+//
+// Response:
+//   W    = clamp(gain, 1, MAX_ROLLOFF_GAIN)
+//   out  = lin * (1 + lin / W^2) / (1 + lin),   lin = srgbToLinear(src) * gain
+//
+// Properties (all verified in ColorPipelineMathTest):
+//   * ev <= 0  -> W = 1 and out == lin  (pure linear gain, no compression)
+//   * ev == 0  -> out == src            (exact identity; also short-circuited
+//                                        in main() so the pass is free)
+//   * out(W) == 1  -> the source white lands on exactly 1.0, so white stays
+//                     white instead of turning grey
+//   * strictly increasing, no NaN/Inf for any input in [0,1] x [-5,5]
+//   * continuous at ev = 0: W -= 1 and the curve collapses to identity
+// W is pinned to the gain so the source white stays white; the cap only kicks in
+// above +2 EV, where it keeps a large +EV driving the image to white instead of
+// asymptotically stalling at grey. Raise MAX_ROLLOFF_GAIN for a softer top end
+// at extreme EV, lower it towards 1 for a harder, more "digital" response.
+const float MAX_ROLLOFF_GAIN = 4.0;
+
+vec3 applyExposure(vec3 srgb, float ev) {
+    float gain = exp2(ev);
+    float w = clamp(gain, 1.0, MAX_ROLLOFF_GAIN);
+    vec3 lin = srgbToLinear(clamp(srgb, 0.0, 1.0)) * gain;
+    lin = lin * (1.0 + lin / (w * w)) / (1.0 + lin);
+    return linearToSrgb(clamp(lin, 0.0, 1.0));
+}
+
 // Linear sRGB to Oklab
 vec3 linearToOklab(vec3 c) {
     // Ensure non-negative input to pow(1/3) for numerical stability on Mali
@@ -148,9 +189,10 @@ void main() {
         c = mix(preLut, c, params.lutGlobalStrength);
     }
 
-    // 3. Brightness: exposure
+    // 3. Brightness: exposure (linear light + soft highlight shoulder).
+    //    Skipped when EV == 0 so the operation is an exact identity.
     if (params.exposure != 0.0) {
-        c *= pow(2.0, params.exposure);
+        c = applyExposure(c, params.exposure);
     }
 
     // 4. Brightness: contrast
@@ -176,16 +218,21 @@ void main() {
         c = gray + (c - gray) * factor;
     }
 
-    // 7. Color: temperature
+    // 7. Color: temperature (chromatic *gain*).
+    //    An additive offset would lift pure black and tint it (0,0,0) ->
+    //    (+0.5,0,-0.5) at full strength; a multiplicative gain keeps black
+    //    black and white white, which is the minimum a white-balance control
+    //    must guarantee. Range: +/-100 slider -> +/-0.5 gain (+/-50%).
     if (params.colorTemperature != 0.0) {
         float adj = params.colorTemperature / 200.0;
-        c.r += adj;
-        c.b -= adj;
+        c.r *= max(1.0 + adj, 0.0);
+        c.b *= max(1.0 - adj, 0.0);
     }
 
-    // 8. Color: tint
+    // 8. Color: tint (green <-> magenta chromatic gain).
     if (params.tint != 0.0) {
-        c.g += params.tint / 200.0;
+        float adj = params.tint / 200.0;
+        c.g *= max(1.0 + adj, 0.0);
     }
 
     // 9. Curve: White (master) maps all channels, then per-channel curves modify individually.
@@ -256,9 +303,19 @@ void main() {
                                             params.shadowGrainRatio, params.midtoneGrainRatio, params.highlightGrainRatio);
         float sizeRatio = getGrainRatio(lum, params.shadowThreshold, params.highlightThreshold,
                                         params.shadowSizeRatio, params.midtoneSizeRatio, params.highlightSizeRatio);
-        float noiseStrength = params.grainStrength * strengthRatio * params.grainSize * sizeRatio * 0.1;
-        float referenceResolution = 1000.0;
-        vec2 grainUV = vec2(coord) / (params.grainSize * sizeRatio * referenceResolution);
+        // Amplitude depends on strength only. Grain *size* must not scale the
+        // amplitude (it used to be multiplied in twice: once here and once in
+        // grainUV), otherwise "size" silently became a second strength knob
+        // and doubled the strength at grainSize = 10.
+        float noiseStrength = params.grainStrength * strengthRatio * 0.1;
+        // The grain period is normalised by the image *short side* instead of a
+        // fixed 1000 px reference: with a pixel-based period the preview (short
+        // side ≈1024) and the full resolution export (≈4000) showed the same
+        // grain at ~3.9x different relative size. At shortSide = 1000 this is
+        // bit-identical to the old formula, so a 1000x1000 image does not move.
+        float shortSide = float(min(params.width, params.height));
+        float grainPeriod = max(params.grainSize * sizeRatio * shortSide, 1.0);
+        vec2 grainUV = vec2(coord) / grainPeriod;
         float baseNoise = gaussianNoise(grainUV, params.grainSeed);
         float redNoise = mix(gaussianNoise(grainUV, params.grainSeed + 0.1), baseNoise, params.channelCorrelation);
         float greenNoise = mix(gaussianNoise(grainUV, params.grainSeed + 0.2), baseNoise, params.channelCorrelation);
@@ -276,17 +333,20 @@ void main() {
     // 12. Vignette
     if (params.vignetteStrength != 0.0) {
         vec2 center = vec2(float(params.width) / 2.0, float(params.height) / 2.0);
-        float maxDist = length(center);
+        float maxDist = max(length(center), 1.0);
         vec2 delta = vec2(float(coord.x), float(coord.y)) - center;
-        float dist = length(delta);
-        float normDist = dist / maxDist;
-        float vig;
+        float normDist = length(delta) / maxDist;
         if (params.vignetteStrength > 0.0) {
-            vig = 1.0 - (normDist * params.vignetteStrength / 100.0);
+            // Darkening stays a display-domain multiply: vig <= 1 can never
+            // clip, and this keeps the look of already saved filters intact.
+            float vig = 1.0 - (normDist * params.vignetteStrength / 100.0);
             c *= clamp(vig, 0.0, 1.0);
         } else {
-            vig = 1.0 + (normDist * (-params.vignetteStrength) / 100.0);
-            c *= clamp(vig, 0.0, 2.0);
+            // Brightening is a light gain, so it must be applied in linear
+            // light: multiplying the sRGB encoding by up to 2.0 used to push
+            // every corner pixel above 0.5 to pure white (blown out corners).
+            float vig = 1.0 + (normDist * (-params.vignetteStrength) / 100.0);
+            c = linearToSrgb(clamp(srgbToLinear(clamp(c, 0.0, 1.0)) * clamp(vig, 0.0, 2.0), 0.0, 1.0));
         }
     }
 

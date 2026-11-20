@@ -67,6 +67,7 @@ import cn.alittlecookie.lutista.manager.OutputFormat
 import cn.alittlecookie.lutista.manager.SettingsManager
 import cn.alittlecookie.lutista.util.ExifResolution
 import cn.alittlecookie.lutista.util.ExifUtils
+import cn.alittlecookie.lutista.util.FilterConfigJson.toConfig
 import cn.alittlecookie.lutista.watermark.model.Scene
 import cn.alittlecookie.lutista.watermark.renderer.WatermarkProcessor
 import coil.compose.AsyncImage
@@ -275,23 +276,11 @@ fun PhotoProcessScreen(
     fun buildFilterConfig(filterId: Long): FilterConfig? {
         if (filterId == 0L) return null
         val entity = filtersFromDb.find { it.id == filterId } ?: return null
-        return FilterConfig(
-            id = entity.id,
-            name = entity.name,
-            lutPath1 = entity.lutPath1,
-            lutConcentration1 = entity.lutConcentration1,
-            lutPath2 = entity.lutPath2,
-            lutConcentration2 = entity.lutConcentration2,
-            lutPrecision = entity.lutPrecision,
-            exposure = entity.exposure,
-            contrast = entity.contrast,
-            highlights = entity.highlights,
-            shadows = entity.shadows,
-            saturation = entity.saturation,
-            colorTemperature = entity.colorTemperature,
-            tint = entity.tint,
-            vignetteStrength = entity.vignetteStrength
-        )
+        // Use the single source of truth for entity -> config conversion.
+        // A hand written FilterConfig used to drop curveConfig / lchConfig /
+        // grainConfig / lutGlobalStrength, so the full resolution export lost
+        // every curve, LCH and grain edit made in the filter editor.
+        return entity.toConfig()
     }
 
     fun saveBitmapToGallery(context: Context, bitmap: Bitmap, displayName: String, exifResolution: ExifResolution?, outputFormat: OutputFormat, quality: Int): Uri? {
@@ -696,23 +685,9 @@ private fun MainPreviewArea(
     fun buildConfigForPreview(filterId: Long): FilterConfig? {
         if (filterId == 0L) return null
         val entity = filtersFromDb.find { it.id == filterId } ?: return null
-        return FilterConfig(
-            id = entity.id,
-            name = entity.name,
-            lutPath1 = entity.lutPath1,
-            lutConcentration1 = entity.lutConcentration1,
-            lutPath2 = entity.lutPath2,
-            lutConcentration2 = entity.lutConcentration2,
-            lutPrecision = entity.lutPrecision,
-            exposure = entity.exposure,
-            contrast = entity.contrast,
-            highlights = entity.highlights,
-            shadows = entity.shadows,
-            saturation = entity.saturation,
-            colorTemperature = entity.colorTemperature,
-            tint = entity.tint,
-            vignetteStrength = entity.vignetteStrength
-        )
+        // Must stay identical to the export path (see buildFilterConfig above):
+        // both now delegate to FilterEntity.toConfig().
+        return entity.toConfig()
     }
 
     // Step 1: Decode image at preview resolution and cache RGBA bytes (only when photo changes)

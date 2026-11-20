@@ -191,6 +191,9 @@ class BuiltinFilterManager(
             lutConcentration1 = filter.lutConcentration1,
             lutPath2 = filter.lutPath2,
             lutConcentration2 = filter.lutConcentration2,
+            // Was missing: duplicating a built-in filter reset the global LUT
+            // strength back to 1.0, so the copy did not match the original.
+            lutGlobalStrength = filter.lutGlobalStrength,
             lutPrecision = filter.lutPrecision,
             exposure = filter.exposure,
             contrast = filter.contrast,

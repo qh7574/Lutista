@@ -210,7 +210,9 @@ object FilterConfigJson {
             curveConfig = jsonToCurveConfig(this.curveJson),
             lchConfig = jsonToLchConfig(this.lchJson),
             vignetteStrength = this.vignetteStrength,
-            grainConfig = jsonToGrainConfig(this.grainJson)
+            grainConfig = jsonToGrainConfig(this.grainJson),
+            unifiedLutPath = this.unifiedLutPath,
+            unifiedLutHash = this.unifiedLutHash
         )
     }
 }

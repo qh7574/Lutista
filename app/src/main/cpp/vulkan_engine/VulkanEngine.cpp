@@ -320,10 +320,14 @@ bool VulkanEngine::createPipeline() {
 // createUbo
 // ============================================================================
 bool VulkanEngine::createUbo() {
-    // FilterParams is now 52 fields * 4 = 208 bytes, but we round up to the device's
-    // minUniformBufferOffsetAlignment (typically 256 or 64).
-    // We just allocate 256 bytes to be safe.
+    // FilterParams is 59 fields * 4 = 236 bytes (see the layout comment in
+    // VulkanEngine.h). The uniform *range* bound in the descriptor set is
+    // sizeof(FilterParams); the allocation itself is rounded up to 256 to match
+    // the usual minUniformBufferOffsetAlignment and leave head-room for params
+    // added later.
     constexpr VkDeviceSize uboSize = 256;
+    static_assert(sizeof(FilterParams) <= uboSize,
+                  "FilterParams no longer fits in the UBO allocation");
 
     if (!m_uboBuffer.create(m_device, uboSize,
                             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
