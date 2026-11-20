@@ -26,6 +26,14 @@ class WatermarkRepository(
 
     suspend fun deleteById(id: Long) = watermarkDao.deleteById(id)
 
+    /**
+     * Persists the user-visible ordering of the watermark list.
+     *
+     * @param orderedIds watermark ids in the order they should be displayed; index becomes
+     *     `sortOrder`.
+     */
+    suspend fun updateSortOrders(orderedIds: List<Long>) = watermarkDao.updateSortOrders(orderedIds)
+
     fun deserializeScene(entity: WatermarkEntity): Scene {
         return try {
             SceneSerializer.fromJson(entity.configJson)

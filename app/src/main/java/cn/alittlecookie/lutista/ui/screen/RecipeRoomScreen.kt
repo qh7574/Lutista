@@ -34,7 +34,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -61,9 +61,9 @@ import cn.alittlecookie.lutista.ui.theme.rememberLutistaBlurBackdrop
 import cn.alittlecookie.lutista.watermark.model.BaseImageElement
 import cn.alittlecookie.lutista.watermark.model.Scene
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -165,58 +165,93 @@ fun RecipeRoomScreen(
     val filtersFromDb by filterRepository.getAllFilters().collectAsState(initial = emptyList())
     val watermarksFromDb by watermarkRepository.getAllWatermarks().collectAsState(initial = emptyList())
 
-    val filters = remember(filtersFromDb) {
-        mutableStateListOf<RecipeItem>().apply {
-            clear()
-            addAll(filtersFromDb.map { entity ->
-                RecipeItem(
-                    id = entity.id,
-                    name = entity.name,
-                    isEnabled = entity.isEnabled,
-                    type = RecipeTab.FILTER,
-                    isBuiltIn = entity.isBuiltIn
-                )
-            })
-        }
-    }
+    // `filters` / `watermarks` are session mirrors of the DB rows. Their instances MUST stay stable
+    // for the whole lifetime of the screen: the previous `remember(filtersFromDb)` created a brand
+    // new list on every Room emission, so the reorder handler mutated one instance while the
+    // persistence watcher was still observing another (already discarded) one — nothing was ever
+    // written back and the order reverted to the DB value after a restart.
+    val filters = remember { mutableStateListOf<RecipeItem>() }
+    val watermarks = remember { mutableStateListOf<RecipeItem>() }
 
-    val watermarks = remember(watermarksFromDb) {
-        mutableStateListOf<RecipeItem>().apply {
-            clear()
-            addAll(watermarksFromDb.map { entity ->
+    // Ids in the order the database currently stores them. Used to skip a write when a drag ends
+    // exactly where it started.
+    var persistedFilterOrder by remember { mutableStateOf<List<Long>>(emptyList()) }
+    var persistedWatermarkOrder by remember { mutableStateOf<List<Long>>(emptyList()) }
+
+    LaunchedEffect(filtersFromDb) {
+        syncRecipeItems(
+            target = filters,
+            incoming = filtersFromDb.map {
                 RecipeItem(
-                    id = entity.id,
-                    name = entity.name,
-                    isEnabled = entity.isEnabled,
+                    id = it.id,
+                    name = it.name,
+                    isEnabled = it.isEnabled,
+                    type = RecipeTab.FILTER,
+                    isBuiltIn = it.isBuiltIn
+                )
+            }
+        )
+        persistedFilterOrder = filtersFromDb.map { it.id }
+    }
+    LaunchedEffect(watermarksFromDb) {
+        syncRecipeItems(
+            target = watermarks,
+            incoming = watermarksFromDb.map {
+                RecipeItem(
+                    id = it.id,
+                    name = it.name,
+                    isEnabled = it.isEnabled,
                     type = RecipeTab.WATERMARK,
                     isBuiltIn = false
                 )
-            })
+            }
+        )
+        persistedWatermarkOrder = watermarksFromDb.map { it.id }
+    }
+
+    // Persist the order on drag end instead of debouncing a watcher: the 600ms window used to be
+    // lost whenever the user left the page or the process died right after a drag.
+    fun persistFilterOrder() {
+        val orderedIds = filters.map { it.id }
+        if (!shouldPersistOrder(orderedIds, persistedFilterOrder)) return
+        // Optimistic marker: the order is considered persisted *before* the write, so a second drag
+        // ending on the same order is not written twice. Rolled back on failure below, because a
+        // failed write produces no Room emission that could correct the marker.
+        val previousOrder = persistedFilterOrder
+        persistedFilterOrder = orderedIds
+        // UNDISPATCHED: the body must start on the calling thread. `rememberCoroutineScope` is
+        // cancelled as soon as the screen leaves the composition, and NonCancellable only protects
+        // a coroutine that has already started — starting synchronously closes that window.
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                // NonCancellable: leaving the screen right after the drag must not abort the batch
+                // half-way and leave a partially applied order behind.
+                withContext(NonCancellable) {
+                    filterRepository.updateSortOrders(orderedIds)
+                }
+            } catch (e: Exception) {
+                // Keep the local order; the next drag (or the next launch) retries from the DB.
+                persistedFilterOrder = previousOrder
+                logger.e("RecipeRoom", "持久化滤镜顺序失败", e)
+            }
         }
     }
 
-    // Debounced persistence: save sort order 500ms after last reorder
-    LaunchedEffect(Unit) {
-        snapshotFlow { filters.map { it.id } }
-            .collectLatest { ids ->
-                delay(600)
-                ids.forEachIndexed { i, id ->
-                    filterRepository.getFilterById(id)?.let {
-                        filterRepository.update(it.copy(sortOrder = i))
-                    }
+    fun persistWatermarkOrder() {
+        val orderedIds = watermarks.map { it.id }
+        if (!shouldPersistOrder(orderedIds, persistedWatermarkOrder)) return
+        val previousOrder = persistedWatermarkOrder
+        persistedWatermarkOrder = orderedIds
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                withContext(NonCancellable) {
+                    watermarkRepository.updateSortOrders(orderedIds)
                 }
+            } catch (e: Exception) {
+                persistedWatermarkOrder = previousOrder
+                logger.e("RecipeRoom", "持久化边框水印顺序失败", e)
             }
-    }
-    LaunchedEffect(Unit) {
-        snapshotFlow { watermarks.map { it.id } }
-            .collectLatest { ids ->
-                delay(600)
-                ids.forEachIndexed { i, id ->
-                    watermarkRepository.getWatermarkById(id)?.let {
-                        watermarkRepository.update(it.copy(sortOrder = i))
-                    }
-                }
-            }
+        }
     }
 
     val currentList = if (selectedSubTab == 0) filters else watermarks
@@ -347,6 +382,9 @@ fun RecipeRoomScreen(
                         val item = watermarks.removeAt(from.index)
                         watermarks.add(to.index, item)
                     }
+                },
+                onReorderFinished = {
+                    if (selectedSubTab == 0) persistFilterOrder() else persistWatermarkOrder()
                 },
                 onEditClick = { item ->
                     if (item.type == RecipeTab.WATERMARK) {
@@ -558,6 +596,52 @@ fun RecipeRoomScreen(
                 onDismiss = { renameItem = null }
             )
         }
+    }
+}
+
+/**
+ * Decides whether a finished drag has to be written back to the database.
+ *
+ * @param current ids in the order the user currently sees on screen.
+ * @param persisted ids in the order the database is known to store; kept in sync by the DB
+ *     emissions and updated optimistically when a write is started.
+ * @return `true` only when there is something to write: order changed and the list is not empty.
+ */
+internal fun shouldPersistOrder(current: List<Long>, persisted: List<Long>): Boolean =
+    current.isNotEmpty() && current != persisted
+
+/**
+ * Mirrors [incoming] (a database snapshot) into [target] (the list rendered on screen).
+ *
+ * The drag gesture mutates [target] directly and the resulting order is written back to the DB
+ * afterwards, so that write-back itself produces a new database snapshot. Blindly replacing
+ * [target] with every snapshot would fight the user's drag (and, with the old debounce watcher,
+ * cancel an in-flight write halfway). Therefore only a *structural* change (rows added or removed)
+ * adopts the database order; otherwise the current on-screen order is preserved and only the
+ * per-row fields are refreshed.
+ *
+ * @param target session-local list rendered by the UI; mutated in place.
+ * @param incoming rows read from the database, already ordered by `sortOrder`.
+ */
+internal fun syncRecipeItems(
+    target: SnapshotStateList<RecipeItem>,
+    incoming: List<RecipeItem>
+) {
+    val targetIds = target.map { it.id }
+    val incomingIds = incoming.map { it.id }
+    val structuralChange =
+        targetIds.size != incomingIds.size || targetIds.toSet() != incomingIds.toSet()
+
+    if (structuralChange) {
+        target.clear()
+        target.addAll(incoming)
+        return
+    }
+
+    incoming.forEach { fresh ->
+        val index = target.indexOfFirst { it.id == fresh.id }
+        if (index < 0) return@forEach
+        if (target[index] != fresh) target[index] = fresh
     }
 }
 
@@ -842,6 +926,7 @@ private fun RecipeList(
     items: List<RecipeItem>,
     isWatermarkTab: Boolean,
     onMove: suspend CoroutineScope.(from: LazyListItemInfo, to: LazyListItemInfo) -> Unit,
+    onReorderFinished: () -> Unit,
     onEditClick: (RecipeItem) -> Unit,
     onMoreAction: (RecipeItem, MoreAction) -> Unit,
     modifier: Modifier = Modifier,
@@ -863,7 +948,7 @@ private fun RecipeList(
                     isWatermarkTab = isWatermarkTab,
                     dragHandleModifier = Modifier.draggableHandle(
                         onDragStarted = {},
-                        onDragStopped = {}
+                        onDragStopped = { onReorderFinished() }
                     ),
                     onEditClick = { onEditClick(item) },
                     onMoreAction = { action -> onMoreAction(item, action) },

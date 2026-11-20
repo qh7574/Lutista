@@ -31,4 +31,11 @@ class FilterRepository(
         filterDao.updateUnifiedLut(id, path, hash)
 
     suspend fun updateTimestamp(id: Long) = filterDao.updateTimestamp(id)
+
+    /**
+     * Persists the user-visible ordering of the filter list.
+     *
+     * @param orderedIds filter ids in the order they should be displayed; index becomes `sortOrder`.
+     */
+    suspend fun updateSortOrders(orderedIds: List<Long>) = filterDao.updateSortOrders(orderedIds)
 }

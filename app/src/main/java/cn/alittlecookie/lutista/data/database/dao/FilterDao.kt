@@ -5,6 +5,7 @@ import androidx.room.Delete
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Update
 import cn.alittlecookie.lutista.data.database.entity.FilterEntity
 import kotlinx.coroutines.flow.Flow
@@ -59,4 +60,28 @@ interface FilterDao {
 
     @Query("SELECT COUNT(*) FROM filters WHERE isBuiltIn = 1")
     suspend fun getBuiltinFilterCount(): Int
+
+    /**
+     * Overwrites the `sortOrder` of a single row and nothing else.
+     *
+     * Reordering must never go through [update]: a full-entity write pushes a whole stale snapshot
+     * back into the table (e.g. an old `unifiedLutPath` or `isEnabled` value captured before the
+     * drag), which silently reverts unrelated edits.
+     */
+    @Query("UPDATE filters SET sortOrder = :sortOrder WHERE id = :id")
+    suspend fun updateSortOrder(id: Long, sortOrder: Int)
+
+    /**
+     * Persists [orderedIds] as the new list order: the first id gets `sortOrder = 0`, the next `1`
+     * and so on.
+     *
+     * Runs inside a single transaction so observers of [getAllFilters] never see a half-applied
+     * order while the batch is being written.
+     */
+    @Transaction
+    suspend fun updateSortOrders(orderedIds: List<Long>) {
+        orderedIds.forEachIndexed { index, id ->
+            if (id != 0L) updateSortOrder(id, index)
+        }
+    }
 }
