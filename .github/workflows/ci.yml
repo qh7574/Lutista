@@ -107,7 +107,7 @@ jobs:
       # AGP 只会产出 app-perf-unsigned.apk，下面的 upload 会以「找不到文件」直接红，
       # 避免出现「流水线绿但包装不上」。
       - name: Assemble minified APK
-        run: ./gradlew assemblePerf --stacktrace
+        run: ./gradlew assemblePerf --stacktrace -PgitSha=${{ github.sha }}
 
       - name: Upload minified APK
         uses: actions/upload-artifact@v4

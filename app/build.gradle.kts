@@ -28,6 +28,12 @@ val hasReleaseSigning: Boolean = listOf(
 val releaseVersionCode: Int = providers.gradleProperty("versionCode").map(String::toInt).orNull ?: 1
 val releaseVersionName: String = providers.gradleProperty("versionName").orNull ?: "1.0"
 
+// commit SHA：写进 BuildConfig 后随崩溃日志 / device.txt 一起导出。
+// R8 混淆后的堆栈必须用「同一个提交」产出的 mapping.txt 才能 retrace，
+// 所以日志里必须自带这个 SHA（CI 通过 -PgitSha=${{ github.sha }} 注入；本地构建为 local，
+// 对应 app/build/outputs/mapping/<variant>/mapping.txt）。
+val gitSha: String = providers.gradleProperty("gitSha").orNull?.takeIf { it.isNotBlank() } ?: "local"
+
 android {
     namespace = "cn.alittlecookie.lutista"
     compileSdk = 37
@@ -40,6 +46,9 @@ android {
         versionName = releaseVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // 崩溃日志里用来对应 mapping.txt，见上方 gitSha 注释。
+        buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
 
         ndk {
             abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")

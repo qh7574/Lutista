@@ -156,6 +156,8 @@ jobs:
           fi
 
           EXTRA_ARGS=()
+          # 崩溃日志里会写到这个 SHA，用来把堆栈对应到同一次构建产出的 mapping.txt。
+          EXTRA_ARGS+=("-PgitSha=${GITHUB_SHA}")
           if [ -n "${VERSION_CODE}" ]; then
             EXTRA_ARGS+=("-PversionCode=${VERSION_CODE}")
           fi
