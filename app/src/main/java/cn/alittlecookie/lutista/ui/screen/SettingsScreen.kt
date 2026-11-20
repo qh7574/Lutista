@@ -1,6 +1,7 @@
 package cn.alittlecookie.lutista.ui.screen
 
 import android.content.Intent
+import android.util.Log
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -235,22 +236,44 @@ fun SettingsScreen(
                     summary = "仅包含应用级别Logcat",
                     onClick = {
                         scope.launch {
-                            val zipFile = logManager.exportLogs()
-                            if (zipFile != null) {
-                                val uri = FileProvider.getUriForFile(
-                                    context,
-                                    "${context.packageName}.fileprovider",
-                                    zipFile
-                                )
-                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                                    type = "application/zip"
-                                    putExtra(Intent.EXTRA_STREAM, uri)
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                }
-                                context.startActivity(Intent.createChooser(shareIntent, "分享日志"))
-                            } else {
+                            val zipFile = runCatching { logManager.exportLogs() }
+                                .onFailure { Log.w("SettingsScreen", "导出日志失败", it) }
+                                .getOrNull()
+                            if (zipFile == null) {
                                 Toast.makeText(context, "暂无日志可导出", Toast.LENGTH_SHORT).show()
+                                return@launch
                             }
+                            // The provider authority in AndroidManifest.xml must stay in
+                            // sync with this string; a mismatch makes getUriForFile throw
+                            // IllegalArgumentException and kills the app on tap.
+                            val authority = "${context.packageName}.fileprovider"
+                            val uri = runCatching {
+                                FileProvider.getUriForFile(context, authority, zipFile)
+                            }.onFailure {
+                                Log.e("SettingsScreen", "无法为 $zipFile 生成 content:// (authority=$authority)", it)
+                            }.getOrNull()
+                            if (uri == null) {
+                                Toast.makeText(context, "日志文件无法分享", Toast.LENGTH_SHORT).show()
+                                return@launch
+                            }
+                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                type = "application/zip"
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                clipData = android.content.ClipData.newRawUri("logs", uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            val chooser = Intent.createChooser(shareIntent, "分享日志").apply {
+                                // Required when this composable is hosted by a non-Activity
+                                // context; harmless otherwise.
+                                if (context !is android.app.Activity) {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                            }
+                            runCatching { context.startActivity(chooser) }
+                                .onFailure {
+                                    Log.e("SettingsScreen", "启动分享失败", it)
+                                    Toast.makeText(context, "没有可用的分享应用", Toast.LENGTH_SHORT).show()
+                                }
                         }
                     }
                 )

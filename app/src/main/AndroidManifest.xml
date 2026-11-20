@@ -62,7 +62,7 @@
         <!-- 文件分享 (logcat导出等) -->
         <provider
             android:name="androidx.core.content.FileProvider"
-            android:authorities="${applicationId}.file provider"
+            android:authorities="${applicationId}.fileprovider"
             android:exported="false"
             android:grantUriPermissions="true">
             <meta-data
