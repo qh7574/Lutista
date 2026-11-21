@@ -44,12 +44,27 @@ fun MainTabScreen(
     onOutputFolderClick: () -> Unit = {},
     onThemeSettingsClick: () -> Unit = {},
     initialPage: Int = 0,
+    requestedPage: Int? = null,
+    onRequestedPageHandled: () -> Unit = {},
     recipeSubTab: Int = 0,
     onRecipeSubTabChange: (Int) -> Unit = {}
 ) {
     val pages = MainPage.entries
     val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { 3 })
     val coroutineScope = rememberCoroutineScope()
+
+    // initialPage 只在首次组合生效（rememberPagerState 内部是 rememberSaveable）。
+    // miuix-nav 的 MiuixDefault 转场会保留被覆盖的一层 composition（opaqueDepth = 1），
+    // 从编辑器返回主页时本组件并不会重建，因此 initialPage 不会重新生效。
+    // requestedPage 是上层下发的一次性定位请求：定位完成后通过 onRequestedPageHandled 清空，
+    // 这样既能在返回时纠正 Tab，也不会和用户手动滑动/切换 Tab 互相打架。
+    LaunchedEffect(requestedPage) {
+        val target = requestedPage ?: return@LaunchedEffect
+        if (pagerState.currentPage != target) {
+            pagerState.scrollToPage(target)
+        }
+        onRequestedPageHandled()
+    }
 
     val settingsManager: SettingsManager = koinInject()
     var useBlur by remember { mutableStateOf(settingsManager.getUseBlurSync()) }

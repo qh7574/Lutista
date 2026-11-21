@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
 }
 
@@ -102,8 +103,12 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
+        // miuix-nav 0.9.4 的公共 API 里有 inline 函数（rememberNavBackStack / NavEntryBuilder.entry），
+        // 而该库是按 JVM target 21 发布的（class 文件 major 65）：调用方 target 低于 21 时
+        // kotlinc 会直接报 INLINE_FROM_HIGHER_PLATFORM。因此本模块统一升到 21
+        // （CI 与本机 Gradle daemon 都是 JDK 21，见 .github/workflows 与 gradle-daemon-jvm.properties）。
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
     }
 
     buildFeatures {
@@ -150,7 +155,6 @@ dependencies {
     implementation(libs.compose.runtime)
     implementation(libs.activity.compose)
     implementation(libs.navigation.compose)
-    implementation(libs.navigation3.runtime)
     debugImplementation(libs.compose.ui.tooling)
 
     // Lifecycle
@@ -192,9 +196,9 @@ dependencies {
     implementation(libs.miuix.blur)
     implementation(libs.miuix.preference)
     implementation(libs.miuix.icons)
-    // miuix 0.9.4 移除了 miuix-navigation3-ui；本项目的 NavDisplay 用的是
-    // androidx.navigation3.ui（此前由该模块传递带入），故改为直接依赖。
-    implementation(libs.navigation3.ui)
+    // 导航运行时：miuix 0.9.4 起 androidx.navigation3 与 miuix-navigation3-ui 均不再使用，
+    // 统一由 MIUIX 自研的 miuix-nav 提供 NavDisplay / NavBackStack / 转场预设。
+    implementation(libs.miuix.nav)
 
     // Reorderable
     implementation(libs.reorderable)
@@ -202,6 +206,9 @@ dependencies {
     // Testing
     testImplementation(libs.junit)
     testImplementation(libs.mockk)
+    // miuix-nav 只把 kotlinx-serialization-json 作为运行期依赖带入（compile classpath 上看不到），
+    // 而导航栈的保存/恢复契约测试需要 Json 来复刻 rememberNavBackStack 的序列化往返。
+    testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 }

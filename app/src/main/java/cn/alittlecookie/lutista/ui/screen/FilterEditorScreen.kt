@@ -125,7 +125,8 @@ private enum class CurveChannel(val label: String, val color: Color) {
 @Composable
 fun FilterEditorScreen(
     filterId: Long,
-    onBackClick: () -> Unit
+    onBackClick: () -> Unit,
+    onHasChangesChange: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
     val filterRepository: FilterRepository = koinInject()
@@ -167,6 +168,28 @@ fun FilterEditorScreen(
     var renameDialogText by remember { mutableStateOf("") }
 
     var pendingExportType by remember { mutableStateOf<ExportFilterUseCase.ExportType?>(null) }
+
+    /**
+     * 本页唯一的返回入口。
+     *
+     * 三条返回路径（顶栏返回箭头 / 系统返回键 / 外层下发的侧滑信号）都必须经过这里，
+     * 保证「有未保存修改时先弹『保存更改?』」的守卫不会被任何一条路径绕过。
+     * 尤其是侧滑：miuix-nav 的 swipeDismiss 提交直接调 NavDisplay.onBack，不经过 BackHandler。
+     */
+    fun requestBack() {
+        if (state.hasChanges) {
+            showBackDialog = true
+        } else {
+            onBackClick()
+        }
+    }
+
+    // 有未保存修改时外层会关掉 miui 的侧滑关闭（防止绕过守卫），这里补一个页面级水平拖拽：
+    // 命中后走同一个 requestBack()，所以「侧滑 → 弹框」在脏状态下依然成立；其余时候是空 Modifier。
+    val dirtyBackSwipe = rememberDirtyBackSwipeModifier(
+        enabled = state.hasChanges,
+        onBack = { requestBack() }
+    )
     val exportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("*/*")
     ) { uri ->
@@ -228,18 +251,13 @@ fun FilterEditorScreen(
     }
 
     Scaffold(
+        modifier = dirtyBackSwipe,
         topBar = {
             SmallTopAppBar(
                 title = state.filterName.ifEmpty { "滤镜编辑" },
                 scrollBehavior = scrollBehavior,
                 navigationIcon = {
-                    IconButton(onClick = {
-                        if (state.hasChanges) {
-                            showBackDialog = true
-                        } else {
-                            onBackClick()
-                        }
-                    }) {
+                    IconButton(onClick = { requestBack() }) {
                         Icon(
                             imageVector = MiuixIcons.Back,
                             contentDescription = "返回"
@@ -522,13 +540,13 @@ fun FilterEditorScreen(
         }
     }
 
-    // 返回处理
-    BackHandler {
-        if (state.hasChanges) {
-            showBackDialog = true
-        } else {
-            onBackClick()
-        }
+    // 返回处理：系统返回键（manifest 关闭了 OnBackInvokedCallback，走 legacy 路径命中这里）
+    BackHandler { requestBack() }
+
+    // 把「是否有未保存修改」上报给外层。外层据此决定侧滑关闭能不能用：有改动时关掉手势，
+    // 避免 swipeDismiss 的提交直接调 NavDisplay.onBack 绕过下面的 requestBack() 守卫。
+    LaunchedEffect(state.hasChanges) {
+        onHasChangesChange(state.hasChanges)
     }
 }
 

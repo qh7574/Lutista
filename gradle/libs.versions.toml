@@ -6,10 +6,10 @@ composeBom = "2026.08.00"
 coreKtx = "1.19.0"
 appcompat = "1.7.1"
 material = "1.14.0"
-lifecycle = "2.10.0"
+# 实际解析版本由 miuix-nav 传递顶到 2.11.0（QA 依赖树实测），这里改成一致值，避免 catalog 说谎。
+lifecycle = "2.11.0"
 exifinterface = "1.4.1"
 navigation = "2.9.8"
-navigation3 = "1.1.0-alpha04"
 koin = "4.2.2"
 room = "2.8.4"
 coroutines = "1.11.0"
@@ -41,10 +41,6 @@ activity-compose = { group = "androidx.activity", name = "activity-compose", ver
 
 # Navigation
 navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigation" }
-navigation3-runtime = { group = "androidx.navigation3", name = "navigation3-runtime", version.ref = "navigation3" }
-# miuix 0.9.4 移除了 miuix-navigation3-ui（改由自研 miuix-nav 替代），
-# 本项目的 NavDisplay 一直是直接用 androidx.navigation3.ui，所以这里显式声明它。
-navigation3-ui = { group = "androidx.navigation3", name = "navigation3-ui", version.ref = "navigation3" }
 
 # Lifecycle
 lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
@@ -82,6 +78,9 @@ miuix-ui = { group = "top.yukonga.miuix.kmp", name = "miuix-ui", version.ref = "
 miuix-preference = { group = "top.yukonga.miuix.kmp", name = "miuix-preference", version.ref = "miuix" }
 miuix-icons = { group = "top.yukonga.miuix.kmp", name = "miuix-icons", version.ref = "miuix" }
 miuix-blur = { group = "top.yukonga.miuix.kmp", name = "miuix-blur", version.ref = "miuix" }
+# MIUIX 自研导航运行时（替代 androidx.navigation3 + 已下线的 miuix-navigation3-ui），
+# 自带 MiuixDefault 转场预设与 swipeDismiss 滑动关闭。
+miuix-nav = { group = "top.yukonga.miuix.kmp", name = "miuix-nav", version.ref = "miuix" }
 
 # Reorderable
 reorderable = { group = "sh.calvin.reorderable", name = "reorderable", version.ref = "reorderable" }
@@ -95,4 +94,6 @@ mockk = { group = "io.mockk", name = "mockk", version.ref = "mockk" }
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+# miuix-nav 的 NavKey 要求 @Serializable（未标注会在首次组合时抛 SerializationException）
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
