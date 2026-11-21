@@ -19,6 +19,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -136,10 +137,24 @@ private fun MainScreenContent() {
     val context = LocalContext.current
 
     var showVulkanDialog by remember { mutableStateOf(false) }
+    // 当前主 Tab 索引的**唯一真值**。刻意放在 NavDisplay 之外，并且用 rememberSaveable：
+    // miuix-nav 会给每个 entry 套 SaveableStateProvider（NavSaveableStateHolder），但那个 holder
+    // 是 NavDisplay 内部的 rememberSaveableStateHolder()，一旦 NavDisplay 整棵离开组合再回来
+    // （本工程的实例：无 Vulkan 设备上的「设备不支持」弹窗在这里 return，把 NavDisplay 摘掉），
+    // holder 实例连同已恢复的 entry 状态一起被丢弃，Pager 会退回 initialPage。
+    // 实测证据（转屏 + 点掉弹窗）：弹窗出现前 MainTabScreen 组合时 currentPage=2（恢复成功），
+    // 点掉弹窗后重新组合变成 currentPage=0（恢复被丢弃）。因此必须有一个不随 NavDisplay 销毁的载体。
+    // 这段代码位于下面 `if (showVulkanDialog) return` 之前，两种分支都会组合，所以一定能进
+    // Activity 级 SaveableStateRegistry。
+    var mainTab by rememberSaveable { mutableIntStateOf(TAB_HOME) }
     // 回到主页时要落到哪个 Tab；null 表示当前没有待处理的定位请求。
-    // 由 MainTabScreen 定位成功后回调清空（见 requestedPage 参数）。
+    // 这是**一次性请求**，语义与 [mainTab] 不同：mainTab 是「现在停在哪」，pendingMainTab 是
+    // 「出栈后请跳到哪」。由 MainTabScreen 定位成功后回调清空（见 requestedPage 参数）。
     var pendingMainTab by remember { mutableStateOf<Int?>(null) }
-    var recipeSubTab by remember { mutableIntStateOf(0) }
+    // 配方室的子 Tab（配方 / 水印）。同属「页面内 UI 状态」，转屏应当保留，因此也 rememberSaveable。
+    // 与 onRecipeSubTabChange 是单向数据流（状态在这里，RecipeRoomScreen 只读参数 + 回调上报），
+    // 不存在双向同步。
+    var recipeSubTab by rememberSaveable { mutableIntStateOf(0) }
     // 编辑器是否有未保存修改（由页面通过 onHasChangesChange 上报）。
     // 用途：决定侧滑关闭是否允许 —— 有未保存修改时必须关掉手势，否则 swipeDismiss 的提交
     // 会直接调 NavDisplay.onBack，绕过页面内「保存更改?」守卫，静默丢弃修改。
@@ -349,9 +364,13 @@ private fun MainScreenContent() {
                 },
                 onMonitorFolderClick = { monitorFolderLauncher.launch(null) },
                 onOutputFolderClick = { outputFolderLauncher.launch(null) },
-                initialPage = pendingMainTab ?: TAB_HOME,
+                // initialPage 用 mainTab（真值），不再用 `pendingMainTab ?: TAB_HOME`：
+                // pendingMainTab 只在「刚出栈」那一刻有值，转屏重建时必为 null，用它会把 Tab 打回主页。
+                initialPage = mainTab,
                 requestedPage = pendingMainTab,
                 onRequestedPageHandled = { pendingMainTab = null },
+                // pager 落点变化回写 mainTab，保证「用户滑动 / 点 Tab / 出栈后跳转」三条路径都同步。
+                onSettledPageChange = { mainTab = it },
                 recipeSubTab = recipeSubTab,
                 onRecipeSubTabChange = { recipeSubTab = it },
                 onThemeSettingsClick = { pushRoute(Screen.ThemeSettings) }
