@@ -3,14 +3,17 @@ project("vulkan_engine")
 
 set(CMAKE_CXX_STANDARD 17)
 
-# Gradle 会对所有 ABI 传入 -DSHADER_ASSET_OUT，但只有 arm64-v8a 需要编译 shader
-# （其他 ABI 链接 stub 库）。此处先在顶层读取一次，避免 CMake 对非 arm64 ABI
+# Gradle 会对所有 ABI 传入 -DSHADER_ASSET_OUT，但只有 arm64-v8a / x86_64 需要编译 shader
+# （其余 ABI 链接 stub 库）。此处先在顶层读取一次，避免 CMake 对走 stub 的 ABI
 # 报 "Manually-specified variables were not used by the project" 警告。
 if(DEFINED SHADER_ASSET_OUT AND NOT SHADER_ASSET_OUT STREQUAL "")
     set(_LUTISTA_SHADER_ASSET_OUT "${SHADER_ASSET_OUT}")
 endif()
 
-if(ANDROID_ABI STREQUAL "arm64-v8a")
+# arm64-v8a 是正式发布 ABI；x86_64 让模拟器/ChromeOS 也能跑真实 GPU 管线。
+# 之前 x86_64 走 stub，导致在 Vulkan 可用的模拟器（如 Android Studio AVD 的
+# Goldfish GFXStream）上也恒定报「设备不支持 Vulkan GPU 加速」。
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64")
 
     find_package(Vulkan REQUIRED)
 
