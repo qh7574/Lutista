@@ -1,0 +1,12 @@
+{
+  "name": "value_shutter",
+  "op": "0x9402",
+  "params": [
+    "0x02000031"
+  ],
+  "rc": "0x2001",
+  "bytes": 12,
+  "note": "快门当前值（160000 = 1/160）",
+  "device": "Panasonic DC-S1",
+  "synthetic": false
+}

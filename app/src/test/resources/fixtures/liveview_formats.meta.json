@@ -1,0 +1,12 @@
+{
+  "name": "liveview_formats",
+  "op": "0x9414",
+  "params": [
+    "0x0D800012"
+  ],
+  "rc": "0x2001",
+  "bytes": 36,
+  "note": "取景格式表（36B）",
+  "device": "Panasonic DC-S1",
+  "synthetic": false
+}

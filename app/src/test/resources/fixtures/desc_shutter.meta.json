@@ -1,0 +1,14 @@
+{
+  "name": "desc_shutter",
+  "op": "0x9108",
+  "params": [
+    "0x02000030",
+    "0x00000000",
+    "0x00000000"
+  ],
+  "rc": "0x2001",
+  "bytes": 440,
+  "note": "快门描述符（440=59档 / 320=29档 / 204=0档）",
+  "device": "Panasonic DC-S1",
+  "synthetic": false
+}

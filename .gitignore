@@ -1,12 +1,8 @@
 *.iml
 .gradle
 /local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
+# IDE 配置整个目录不入库（含本机 JDK 名漂移等，避免污染提交与上游合并）
+/.idea/
 .DS_Store
 /build
 /captures
@@ -17,8 +13,6 @@ local.properties
 /.opencode/
 /AGENTS.md
 /.tamp/
-/.idea/deviceManager.xml
-/.idea/deploymentTargetSelector.xml
 /app/release/
 
 # Vulkan shader 构建产物（由 CMake + glslc 生成）

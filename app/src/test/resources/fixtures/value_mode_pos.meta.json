@@ -1,0 +1,12 @@
+{
+  "name": "value_mode_pos",
+  "op": "0x9402",
+  "params": [
+    "0x02000082"
+  ],
+  "rc": "0x2001",
+  "bytes": 10,
+  "note": "模式位当前值（0x9402 条目链）",
+  "device": "Panasonic DC-S1",
+  "synthetic": false
+}

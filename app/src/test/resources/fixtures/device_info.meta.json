@@ -1,0 +1,11 @@
+{
+  "name": "device_info",
+  "op": "0x1001",
+  "params": [],
+  "rc": "0x2001",
+  "bytes": 223,
+  "note": "GetDeviceInfo 全量回包（DeviceInfoParser 输入）",
+  "device": "Panasonic DC-S1",
+  "synthetic": false,
+  "sanitized": ["serialNumber"]
+}

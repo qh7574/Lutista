@@ -1,0 +1,14 @@
+{
+  "name": "desc_ev",
+  "op": "0x9108",
+  "params": [
+    "0x02000060",
+    "0x00000000",
+    "0x00000000"
+  ],
+  "rc": "0x2001",
+  "bytes": 264,
+  "note": "曝光补偿描述符",
+  "device": "Panasonic DC-S1",
+  "synthetic": false
+}

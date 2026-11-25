@@ -1,0 +1,14 @@
+{
+  "name": "desc_iso",
+  "op": "0x9108",
+  "params": [
+    "0x02000020",
+    "0x00000000",
+    "0x00000000"
+  ],
+  "rc": "0x2001",
+  "bytes": 316,
+  "note": "ISO 描述符（拍照 316B / 视频 256B）",
+  "device": "Panasonic DC-S1",
+  "synthetic": false
+}

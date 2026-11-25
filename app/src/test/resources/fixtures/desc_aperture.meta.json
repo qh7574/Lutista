@@ -1,0 +1,14 @@
+{
+  "name": "desc_aperture",
+  "op": "0x9108",
+  "params": [
+    "0x02000040",
+    "0x00000000",
+    "0x00000000"
+  ],
+  "rc": "0x2001",
+  "bytes": 354,
+  "note": "光圈描述符（354=78档 / 198=0档）",
+  "device": "Panasonic DC-S1",
+  "synthetic": false
+}

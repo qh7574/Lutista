@@ -1,0 +1,12 @@
+{
+  "name": "value_aperture",
+  "op": "0x9402",
+  "params": [
+    "0x02000041"
+  ],
+  "rc": "0x2001",
+  "bytes": 10,
+  "note": "光圈当前值（35 = f/3.5）",
+  "device": "Panasonic DC-S1",
+  "synthetic": false
+}
