@@ -1,0 +1,80 @@
+{
+  "name": "s1Full",
+  "synthetic": true,
+  "physicalValidation": false,
+  "device": {
+    "model": "DC-S1",
+    "serial": "SYNTHETIC-S1",
+    "firmware": "2.4",
+    "vid": "0x04da",
+    "pid": "0x2382",
+    "ops": [
+      "0x1007",
+      "0x1009",
+      "0x100a",
+      "0x1015",
+      "0x101b"
+    ],
+    "props": [
+      "0x5001"
+    ],
+    "formats": [
+      "0x3800",
+      "0x3801"
+    ]
+  },
+  "storageIds": [
+    "0x10001"
+  ],
+  "responses": [
+    {
+      "op": "0x9414",
+      "params": [
+        "0x0d800012"
+      ],
+      "payload": "liveview_formats",
+      "elapsedMs": 7
+    },
+    {
+      "op": "0x9402",
+      "params": [
+        "0x02000082"
+      ],
+      "payload": "value_mode_pos",
+      "elapsedMs": 5
+    },
+    {
+      "op": "0x9402",
+      "params": [
+        "0x02000083"
+      ],
+      "hex": "83000002020000000100",
+      "elapsedMs": 3
+    },
+    {
+      "op": "0x9108",
+      "params": [
+        "0x02000020",
+        "0",
+        "0"
+      ],
+      "payload": "desc_iso",
+      "elapsedMs": 11
+    },
+    {
+      "op": "0x1007",
+      "params": [
+        "0xffffffff",
+        "0",
+        "0xffffffff"
+      ],
+      "hex": "020000001100000002000080",
+      "elapsedMs": 13
+    }
+  ],
+  "expected": {
+    "shape": "Full",
+    "profileId": "lumix-s1",
+    "totalProbeMs": 39
+  }
+}

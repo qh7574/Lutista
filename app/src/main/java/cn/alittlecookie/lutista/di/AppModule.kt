@@ -21,6 +21,17 @@ import cn.alittlecookie.lutista.manager.PermissionManager
 import cn.alittlecookie.lutista.manager.SettingsManager
 import cn.alittlecookie.lutista.service.ImageProcessingService
 import cn.alittlecookie.lutista.service.TaskSubmissionManager
+import cn.alittlecookie.lutista.tether.debug.TetherDebugConfig
+import cn.alittlecookie.lutista.tether.debug.TetherDiagLogger
+import cn.alittlecookie.lutista.tether.driver.CameraDriverFactory
+import cn.alittlecookie.lutista.tether.driver.PtpUsbDriverFactory
+import cn.alittlecookie.lutista.tether.profile.CameraProfileRegistry
+import cn.alittlecookie.lutista.tether.session.TetherRuntime
+import cn.alittlecookie.lutista.tether.session.UsbHub
+import cn.alittlecookie.lutista.tether.store.CapabilityCache
+import cn.alittlecookie.lutista.tether.transport.TransportFactory
+import cn.alittlecookie.lutista.tether.transport.UsbTransportFactory
+import kotlinx.coroutines.flow.first
 import cn.alittlecookie.lutista.util.FileUtils
 import cn.alittlecookie.lutista.util.ImageUtils
 import cn.alittlecookie.lutista.util.LutParser
@@ -32,6 +43,7 @@ import cn.alittlecookie.lutista.watermark.renderer.OutputRenderer
 import cn.alittlecookie.lutista.watermark.renderer.WatermarkProcessor
 import org.koin.android.ext.koin.androidContext
 import org.koin.core.module.dsl.singleOf
+import org.koin.core.parameter.parametersOf
 import org.koin.dsl.module
 
 val appModule = module {
@@ -87,4 +99,29 @@ val appModule = module {
     singleOf(::WatermarkProcessor)
     singleOf(::ResourceManager)
     singleOf(::HistoryManager)
+
+    // Tether: each runtime owns one hub; both factories receive that same hub explicitly.
+    single { CameraProfileRegistry() }
+    single { TetherDebugConfig(get()) }
+    single { TetherDiagLogger() }
+    single {
+        val settings = get<SettingsManager>()
+        CapabilityCache(read = { settings.tetherCapsCache.first() }, write = settings::setTetherCapsCache)
+    }
+    factory { UsbHub(androidContext()) }
+    factory<TransportFactory> { (hub: UsbHub) -> UsbTransportFactory(hub, get()) }
+    factory<CameraDriverFactory> { (hub: UsbHub) ->
+        PtpUsbDriverFactory(
+            transportFactory = get<TransportFactory> { parametersOf(hub) },
+            registry = get(),
+            cache = get(),
+            config = get(),
+            logger = get(),
+            requestPermission = { hub.requestPermission(it.device) },
+        )
+    }
+    factory {
+        val hub = get<UsbHub>()
+        TetherRuntime(hub, get<CameraDriverFactory> { parametersOf(hub) }, get(), get())
+    }
 }

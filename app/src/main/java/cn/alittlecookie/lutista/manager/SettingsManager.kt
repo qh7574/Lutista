@@ -341,7 +341,41 @@ class SettingsManager(
             java.text.SimpleDateFormat("yyyy", java.util.Locale.US).format(java.util.Date()))
     }
 
+    // T02 tether capability cache and opt-in diagnostic settings.
+    val tetherCapsCache: Flow<String> = dataStore.data.map { prefs -> prefs[TETHER_CAPS_CACHE_KEY] ?: "" }
+    suspend fun setTetherCapsCache(value: String) { dataStore.edit { it[TETHER_CAPS_CACHE_KEY] = value } }
+
+    val tetherProbeSchema: Flow<Int> = dataStore.data.map { prefs -> prefs[TETHER_PROBE_SCHEMA_KEY] ?: 1 }
+    suspend fun setTetherProbeSchema(value: Int) { dataStore.edit { it[TETHER_PROBE_SCHEMA_KEY] = value } }
+
+    val tetherDebugEnabled: Flow<Boolean> = dataStore.data.map { prefs -> prefs[TETHER_DEBUG_ENABLED_KEY] ?: false }
+    suspend fun setTetherDebugEnabled(value: Boolean) { dataStore.edit { it[TETHER_DEBUG_ENABLED_KEY] = value } }
+
+    val tetherDebugCapOverride: Flow<String> = dataStore.data.map { prefs -> prefs[TETHER_DEBUG_CAP_OVERRIDE_KEY] ?: "None" }
+    suspend fun setTetherDebugCapOverride(value: String) { dataStore.edit { it[TETHER_DEBUG_CAP_OVERRIDE_KEY] = value } }
+
+    val tetherDebugAllowValueWrite: Flow<Boolean> = dataStore.data.map { prefs -> prefs[TETHER_DEBUG_ALLOW_VALUE_WRITE_KEY] ?: false }
+    suspend fun setTetherDebugAllowValueWrite(value: Boolean) { dataStore.edit { it[TETHER_DEBUG_ALLOW_VALUE_WRITE_KEY] = value } }
+
+    val tetherDebugFaultSmallRx: Flow<Boolean> = dataStore.data.map { prefs -> prefs[TETHER_DEBUG_FAULT_SMALL_RX_KEY] ?: false }
+    suspend fun setTetherDebugFaultSmallRx(value: Boolean) { dataStore.edit { it[TETHER_DEBUG_FAULT_SMALL_RX_KEY] = value } }
+
+    val tetherDebugFaultConcurrent: Flow<Boolean> = dataStore.data.map { prefs -> prefs[TETHER_DEBUG_FAULT_CONCURRENT_KEY] ?: false }
+    suspend fun setTetherDebugFaultConcurrent(value: Boolean) { dataStore.edit { it[TETHER_DEBUG_FAULT_CONCURRENT_KEY] = value } }
+
+    val tetherDebugFaultClaimFail: Flow<Boolean> = dataStore.data.map { prefs -> prefs[TETHER_DEBUG_FAULT_CLAIM_FAIL_KEY] ?: false }
+    suspend fun setTetherDebugFaultClaimFail(value: Boolean) { dataStore.edit { it[TETHER_DEBUG_FAULT_CLAIM_FAIL_KEY] = value } }
+
     companion object {
+        private val TETHER_CAPS_CACHE_KEY = stringPreferencesKey("tether_caps_cache")
+        private val TETHER_PROBE_SCHEMA_KEY = intPreferencesKey("tether_probe_schema")
+        private val TETHER_DEBUG_ENABLED_KEY = booleanPreferencesKey("tether_debug_enabled")
+        private val TETHER_DEBUG_CAP_OVERRIDE_KEY = stringPreferencesKey("tether_debug_cap_override")
+        private val TETHER_DEBUG_ALLOW_VALUE_WRITE_KEY = booleanPreferencesKey("tether_debug_allow_value_write")
+        private val TETHER_DEBUG_FAULT_SMALL_RX_KEY = booleanPreferencesKey("tether_debug_fault_small_rx")
+        private val TETHER_DEBUG_FAULT_CONCURRENT_KEY = booleanPreferencesKey("tether_debug_fault_concurrent")
+        private val TETHER_DEBUG_FAULT_CLAIM_FAIL_KEY = booleanPreferencesKey("tether_debug_fault_claim_fail")
+
         private val DEFAULT_TEMPLATE = "<fname>-<filter>"
         private val USE_BLUR_KEY = booleanPreferencesKey("use_blur")
         private val USE_MONET_KEY = booleanPreferencesKey("use_monet")

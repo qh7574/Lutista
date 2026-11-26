@@ -1,0 +1,10 @@
+{
+  "name": "corruptDeviceInfo",
+  "synthetic": true,
+  "physicalValidation": false,
+  "deviceInfoHex": "6400010000006400ff",
+  "expected": {
+    "parseFailure": true,
+    "noProbeCommands": true
+  }
+}
