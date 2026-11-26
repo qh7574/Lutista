@@ -124,9 +124,13 @@ class TetherRuntime(
     }
 
     suspend fun disconnect(reason: CloseReason = CloseReason.USER) {
+        closeConnection(reason)
+        mutableMessage.value = "USB 会话已关闭，原因：" + reason
+    }
+
+    private suspend fun closeConnection(reason: CloseReason) {
         if (reason != CloseReason.DETACHED) autoConnectRequested = false
         driverLock.withLock { active?.disconnect(reason) }
-        mutableMessage.value = "USB 会话已关闭，原因：" + reason
     }
 
     suspend fun reprobe() {
@@ -153,7 +157,8 @@ class TetherRuntime(
             mutableMessage.value = "只读序列已执行；请按实际日志核验，尚未签收真机门禁"
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Throwable) { mutableMessage.value = failure.javaClass.simpleName + ": " + failure.message }
-        finally { withContext(NonCancellable) { disconnect(CloseReason.USER) } }
+        // Closing USB must not replace the evidence result with the manual-close message.
+        finally { withContext(NonCancellable) { closeConnection(CloseReason.USER) } }
     }
 
     suspend fun runFault(name: String) {
