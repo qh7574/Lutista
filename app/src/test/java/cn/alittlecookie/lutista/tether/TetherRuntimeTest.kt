@@ -8,6 +8,7 @@ import cn.alittlecookie.lutista.tether.driver.CameraDriverFactory
 import cn.alittlecookie.lutista.tether.driver.CloseReason
 import cn.alittlecookie.lutista.tether.driver.ConnectOutcome
 import cn.alittlecookie.lutista.tether.driver.PtpUsbDriver
+import cn.alittlecookie.lutista.tether.driver.UsbTarget
 import cn.alittlecookie.lutista.tether.profile.CameraCapabilities
 import cn.alittlecookie.lutista.tether.protocol.PtpConstants
 import cn.alittlecookie.lutista.tether.transport.PtpDeviceCaps
@@ -21,6 +22,7 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.runs
 import io.mockk.unmockkStatic
+import io.mockk.verify
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CompletableDeferred
@@ -65,6 +67,10 @@ class TetherRuntimeTest {
         val api: PtpSessionApi,
         val open: AtomicBoolean,
         val trace: MutableList<String>,
+        val hub: UsbHub,
+        val device: UsbDevice,
+        val drivers: CameraDriverFactory,
+        val connectTargets: MutableList<UsbTarget>,
     )
 
     private fun harness(): Harness {
@@ -96,11 +102,19 @@ class TetherRuntimeTest {
         val driver = mockk<PtpUsbDriver>()
         every { driver.session } returns session
         every { driver.capabilities } returns MutableStateFlow(CameraCapabilities.empty())
-        coEvery { driver.connect() } coAnswers {
-            trace += "connect"
-            open.set(true)
-            state.value = TetherState(TetherPhase.Connected)
-            ConnectOutcome.Connected
+        val connectTargets = mutableListOf<UsbTarget>()
+        coEvery { driver.connect(any()) } coAnswers {
+            val current = firstArg<UsbTarget>()
+            connectTargets += current
+            if (!current.permissionGranted) {
+                state.value = TetherState(TetherPhase.NotAttached, message = "USB 授权未完成，可重试")
+                ConnectOutcome.PermissionDenied
+            } else {
+                trace += "connect"
+                open.set(true)
+                state.value = TetherState(TetherPhase.Connected)
+                ConnectOutcome.Connected
+            }
         }
         coEvery { driver.disconnect(any()) } coAnswers {
             // This also fails the cancellation test if cleanup loses NonCancellable.
@@ -130,7 +144,7 @@ class TetherRuntimeTest {
             every { Dispatchers.Main } returns main
             TetherRuntime(hub, drivers, config, logger).also { runtimes += it }
         } finally { unmockkStatic(Dispatchers::class) }
-        return Harness(runtime, session, driver, api, open, trace)
+        return Harness(runtime, session, driver, api, open, trace, hub, device, drivers, connectTargets)
     }
 
     private suspend fun assertClosed(h: Harness) {
@@ -195,6 +209,25 @@ class TetherRuntimeTest {
             assertClosed(h)
             coVerify(exactly = 0) { h.session.drainDiagnosticEvents(any()) }
         } finally { job.cancelAndJoin() }
+    }
+
+    @Test fun reusedUsbAddressRefreshesRevokedAndExternallyGrantedPermission() = runBlocking {
+        val h = harness()
+        assertEquals(ConnectOutcome.Connected, h.runtime.connect())
+        h.runtime.disconnect(CloseReason.DETACHED)
+
+        // The same USB address/VID/PID is attached again without its old permission.
+        every { h.hub.hasPermission(h.device) } returns false
+        assertEquals(ConnectOutcome.PermissionDenied, h.runtime.connect())
+        assertFalse(h.open.get())
+
+        // A system grant then becomes visible without changing this target's cache key.
+        every { h.hub.hasPermission(h.device) } returns true
+        assertEquals(ConnectOutcome.Connected, h.runtime.connect())
+        assertEquals(listOf(true, false, true), h.connectTargets.map { it.permissionGranted })
+        assertEquals(1, h.connectTargets.map { it.cacheKey }.distinct().size)
+        verify(exactly = 1) { h.drivers.create(any(), any()) }
+        coVerify(exactly = 0) { h.driver.connect() }
     }
 
     @Test fun manualCloseKeepsItsExistingMessage() = runBlocking {

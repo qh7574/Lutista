@@ -82,6 +82,31 @@ class PtpUsbDriverFactoryTest {
         }
     }
 
+    @Test fun reusedDriverRequestsRevokedPermissionBeforeAnyUsbOpen() = runBlocking {
+        mockkStatic(SystemClock::class)
+        every { SystemClock.elapsedRealtime() } returns 100L
+        val raw = FactoryTransport(true)
+        val original = driverTarget(permissionGranted = true)
+        val reattached = original.copy(permissionGranted = false)
+        val seen = mutableListOf<UsbTarget>()
+        val factory = factory(raw) { seen += it; false }
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val driver = factory.create(original, scope) as PtpUsbDriver
+            assertEquals(original.cacheKey, reattached.cacheKey)
+
+            assertEquals(ConnectOutcome.PermissionDenied, driver.connect(reattached))
+
+            assertEquals(1, seen.size)
+            assertSame(reattached, seen.single())
+            assertEquals(0, raw.creates)
+        } finally {
+            scope.cancel()
+            scope.coroutineContext[Job]!!.join()
+            unmockkStatic(SystemClock::class)
+        }
+    }
+
     private fun factory(
         transport: TransportFactory,
         permission: suspend (UsbTarget) -> Boolean = { it.permissionGranted },

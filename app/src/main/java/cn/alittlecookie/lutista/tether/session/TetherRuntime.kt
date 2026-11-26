@@ -93,7 +93,9 @@ class TetherRuntime(
                 }
                 active
             } ?: return ConnectOutcome.NotAttached
-            return driver.connect().also { mutableMessage.value = it.toString() }
+            // USB addresses may be reused after detach, while Android revokes permission.
+            // Keep this driver's history but pass the freshly enumerated permission snapshot.
+            return driver.connect(target).also { mutableMessage.value = it.toString() }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Throwable) {

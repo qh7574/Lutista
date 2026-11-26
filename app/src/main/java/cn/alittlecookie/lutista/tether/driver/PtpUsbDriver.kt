@@ -82,6 +82,9 @@ class PtpUsbDriver internal constructor(
     }
 
     override suspend fun connect(): ConnectOutcome = session.connect()
+
+    /** Reusing a driver must not reuse a previous USB attachment's permission snapshot. */
+    internal suspend fun connect(target: UsbTarget): ConnectOutcome = session.connect(target)
     override suspend fun disconnect(reason: CloseReason) = session.close(reason)
 
     /** Starts the session's asynchronous refresh; returning does not await new capabilities. */
