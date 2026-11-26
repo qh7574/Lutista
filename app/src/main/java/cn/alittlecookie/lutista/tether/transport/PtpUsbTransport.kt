@@ -423,12 +423,19 @@ class PtpUsbTransport(
 
         val out = ArrayList<PtpEvent>(4)
         try {
+            // 连续事件/噪声也必须归还唯一 IO 线程；假时钟不前进时由读取次数兜底。
+            val deadline = now() + 8L
+            var successfulReads = 0
             val request = intrMaxPacketSize.coerceIn(8, intrBuf.size)
             intrRx.reserveTail(request)
-            while (true) {
+            while (successfulReads < 8) {
+                val remaining = deadline - now()
+                if (remaining <= 0) break
                 // 没有事件时**不会自旋**：一次读不到就 break，不在 1~2 ms 的短超时上循环重试。
-                val read = conn.bulkTransfer(ep, intrBuf, request, perRead)
+                val read = conn.bulkTransfer(ep, intrBuf, request, minOf(perRead.toLong(), remaining).toInt())
                 if (read <= 0) break
+                successfulReads += 1
+                // 每次成功读取仍解完所有完整容器；半包保留到下一轮，不因预算耗尽清空。
                 intrRx.append(intrBuf, 0, read)
                 while (true) {
                     when (val decoded = PtpContainerCodec.decodeNext(intrRx.buffer, intrRx.readOffset, intrRx.size)) {
