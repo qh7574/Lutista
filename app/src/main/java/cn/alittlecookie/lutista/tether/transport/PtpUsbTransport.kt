@@ -43,6 +43,13 @@ class PtpUsbTransport(
      * `SystemClock` 在 JVM 单测里是 android.jar 的 stub，不可调用。
      */
     private val now: () -> Long = { SystemClock.elapsedRealtime() },
+    /**
+     * 可选的 USB 诊断采集器（T01b）。**默认 `null` 时零分配、零开销**：所有采集点都是
+     * 内联 `emitDiag` 的可空判断，关闭时不求值回调与实参，因此不会有额外对象分配、
+     * 字符串拼接或额外的时钟读取。本钩子只采集运行时真值，不改变任何协议逻辑、状态机、
+     * 异常类型 / message、超时 / fatal / ZLP / 短写 / txid 语义；详见 [PtpDiagSink]。
+     */
+    private val diag: PtpDiagSink? = null,
 ) : PtpTransport {
 
     private companion object {
@@ -269,12 +276,33 @@ class PtpUsbTransport(
 
         val txid = txids.next()
         val deadline = now() + timeoutMs.coerceAtLeast(1)
+        // 诊断起点由 deadline 反推，避免 diag == null 时为了算耗时多读一次单调时钟。
+        val diagStartedAtMs = if (diag != null) deadline - timeoutMs.coerceAtLeast(1) else 0L
+        var dataBytes = 0L
+        var diagResponseCode = 0
+        var diagCompleted = false
+        var diagException: Throwable? = null
         try {
             val inEp = bulkIn ?: throw PtpException("bulk IN 端点缺失（open() 未完成或端点被系统回收）")
             // 阶段顺序：命令容器 → DATA OUT 容器 → 读响应，txid 共用。
-            writeFrames(conn, BulkWriteFrames.build(op, txid, dataOut), deadline)
+            val frames = BulkWriteFrames.build(op, txid, dataOut)
+            emitDiag {
+                onFrames(
+                    opcode = op.code,
+                    frames = frames.mapIndexed { index, frame ->
+                        val header = PtpContainerCodec.peekHeader(frame)
+                        PtpDiagFrame(
+                            frameIndex = index,
+                            type = header?.type ?: -1,
+                            code = header?.code ?: -1,
+                            transactionId = header?.transactionId ?: -1L,
+                            length = header?.length ?: frame.size,
+                        )
+                    },
+                )
+            }
+            writeFrames(conn, frames, deadline)
 
-            var dataBytes = 0L
             var sawDataPhase = false
             var response: PtpResponse? = null
 
@@ -336,14 +364,33 @@ class PtpUsbTransport(
                 // 约束 3：这是合法情形，数据已经照常收完；只做诊断打点。
                 Timber.tag(LOG_TAG).d("事务 0x%x 未预期却有数据段（已整包收完 %d 字节）", op.code, dataBytes)
             }
+            diagResponseCode = result.code
+            diagCompleted = true
             return result
         } catch (t: PtpException) {
             // 通道层面的一切失败（超时 / 结构非法 / 短写 / 端点丢失 / 缓冲不足）都归这里：
             // 约束 8 —— 之后通道可能停在 halt，除了拔插没有可靠的自愈手段。
             if (fatalOnFailure) fatal = true
+            diagException = t
+            throw t
+        } catch (t: Throwable) {
+            diagException = t
             throw t
         } finally {
             busy.set(false)
+            emitDiag {
+                onTransaction(
+                    opcode = op.code,
+                    transactionId = txid,
+                    responseCode = if (diagCompleted) diagResponseCode else null,
+                    dataBytes = dataBytes,
+                    elapsedMs = now() - diagStartedAtMs,
+                    isFatal = fatal,
+                    isPreflight = !fatalOnFailure,
+                    exceptionType = diagException?.javaClass?.simpleName,
+                    exceptionMessage = diagException?.message,
+                )
+            }
         }
     }
 
@@ -430,10 +477,24 @@ class PtpUsbTransport(
         var request = minOf(READ_CHUNK, tail)
         request -= request % maxPacketSize
         if (request < maxPacketSize) {
+            emitDiag {
+                onFillRejected(tail = tail, maxPacketSize = maxPacketSize)
+            }
             throw PtpException("rx 缓冲尾部空间不足（tail=$tail maxPacket=$maxPacketSize），无法按对齐长度读")
         }
         val timeout = remainingTimeoutMs(deadline)
         val read = conn.bulkTransfer(endpoint, readBuf, request, timeout)
+        // 成功 / ZLP / 超时三条路径都在这里出真值；回调先于下面的抛异常，故 read < 0 也能采到。
+        emitDiag {
+            onBulkIn(
+                request = request,
+                read = read,
+                maxPacketSize = maxPacketSize,
+                endpointAddress = endpoint.address,
+                isZlp = read == 0,
+                isTimeout = read < 0,
+            )
+        }
         if (read < 0) {
             throw PtpTimeoutException(
                 "bulk IN 超时/失败（ep=0x${endpoint.address.toString(16)} request=$request timeout=${timeout}ms）",
@@ -491,8 +552,49 @@ class PtpUsbTransport(
      */
     private fun writeFrames(conn: UsbDeviceConnection, frames: List<ByteArray>, deadline: Long) {
         val outEp = bulkOut ?: throw PtpException("bulk OUT 端点缺失（open() 未完成或端点被系统回收）")
+        if (diag == null) {
+            BulkWriteFrames.writeAll(frames, maxPacketSize) { buffer, offset, length ->
+                conn.bulkTransfer(outEp, buffer, offset, length, remainingTimeoutMs(deadline))
+            }
+            return
+        }
+        var writeSequence = 0
         BulkWriteFrames.writeAll(frames, maxPacketSize) { buffer, offset, length ->
-            conn.bulkTransfer(outEp, buffer, offset, length, remainingTimeoutMs(deadline))
+            val written = conn.bulkTransfer(outEp, buffer, offset, length, remainingTimeoutMs(deadline))
+            writeSequence += 1
+            // writeAll 的短写循环与帧末 ZLP 都会再次进入本 lambda —— 每次都记，不合并。
+            emitDiag {
+                onBulkOut(
+                    frameIndex = frameIndexFor(frames, buffer),
+                    writeSequence = writeSequence,
+                    offset = offset,
+                    length = length,
+                    written = written,
+                    isZlp = length == 0,
+                )
+            }
+            written
+        }
+    }
+
+    /**
+     * 由 `BulkWriteFrames.writeAll` 传入的缓冲区实例反查帧序号：它始终把 `frames[i]` 本身
+     * 传给 `write`（短写与 ZLP 补写复用同一实例），故引用相等即可定位，一次事务至多 2 帧。
+     */
+    private fun frameIndexFor(frames: List<ByteArray>, buffer: ByteArray): Int {
+        for (i in frames.indices) {
+            if (frames[i] === buffer) return i
+        }
+        return -1
+    }
+
+    /** 诊断与实参采集都在隔离边界内；关闭时直接返回，内联避免创建回调对象。 */
+    private inline fun emitDiag(block: PtpDiagSink.() -> Unit) {
+        val sink = diag ?: return
+        try {
+            sink.block()
+        } catch (_: Throwable) {
+            // 诊断失败不能丢失 USB 字节、修改 fatal，或覆盖事务原有返回值与异常。
         }
     }
 
