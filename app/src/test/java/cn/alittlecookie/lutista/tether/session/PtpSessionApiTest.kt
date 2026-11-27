@@ -210,6 +210,8 @@ class PtpSessionApiTest {
         val count = transport.calls.size
         expectFailure<IllegalArgumentException> { api.getObjectHandles(storage = 0x0001_0001L) }
         expectFailure<IllegalArgumentException> { api.getObjectHandles(format = 0x3801L) }
+        expectFailure<IllegalArgumentException> { api.getObjectHandles(parent = 0) }
+        expectFailure<IllegalArgumentException> { api.getObjectHandles(parent = 0x1_0000_0000L) }
         assertEquals(count, transport.calls.size)
         api.getObjectHandles(parent = 0xF000_0010L)
         assertArrayEquals(longArrayOf(0xFFFF_FFFFL, 0, 0xF000_0010L), transport.calls.last().op.params)
@@ -243,18 +245,51 @@ class PtpSessionApiTest {
         assertEquals(1, transport.calls.size)
     }
 
-    @Test fun `deferred object liveview capture and movie APIs send no USB command`() = runBlocking {
+    @Test fun `object methods preserve unsigned parameters and stream instead of collecting`() = runBlocking {
         val transport = RecordingTransport()
         val api: PtpSessionApi = PtpSessionApiImpl(transport)
-        val calls: List<suspend () -> Unit> = listOf(
-            { api.getObjectInfo(1); Unit }, { api.getThumb(1); Unit },
-            { api.getObject(1) { _, _ -> }; Unit }, { api.getPartialObject(1, 0, 8); Unit },
-            { api.liveView(true); Unit }, { api.liveViewFrame { _, _ -> }; Unit },
-            { api.setLiveViewFormat(byteArrayOf(1)); Unit }, { api.initiateCapture(false); Unit },
-            { api.movieRec(true); Unit },
-        )
-        calls.forEach { expectFailure<UnsupportedOperationException>(it) }
-        assertTrue(transport.calls.isEmpty())
+        val chunk = ByteArray(1024 * 1024)
+        transport.onCall = { call -> repeat(6) { call.dataSink?.invoke(chunk, chunk.size) } }
+        var total = 0L
+        api.getObject(0xF0000010L) { _, count -> total += count }
+        assertEquals(6L * 1024 * 1024, total)
+        assertEquals(0x1009, transport.calls.single().op.code)
+        assertArrayEquals(longArrayOf(0xF0000010L), transport.calls.single().op.params)
+        transport.onCall = {}
+        api.getObjectInfo(0xF0000010L); api.getThumb(0xF0000010L)
+        api.getPartialObject(0xF0000010L, 0x80000000L, 512 * 1024L)
+        assertEquals(listOf(0x1009, 0x1008, 0x100A, 0x101B), transport.calls.map { it.op.code })
+        assertArrayEquals(longArrayOf(0xF0000010L, 0x80000000L, 512 * 1024L), transport.calls.last().op.params)
+        val count = transport.calls.size
+        expectFailure<IllegalArgumentException> { api.getPartialObject(1, 0, 512 * 1024L + 1) }
+        expectFailure<IllegalArgumentException> { api.getPartialObject(1, 0xFFFFFFFFL, 2) }
+        expectFailure<IllegalArgumentException> { api.getObjectInfo(0xFFFFFFFFL) }
+        assertEquals(count, transport.calls.size)
+    }
+
+    @Test fun `bounded object replies reject metadata thumbnail and partial overflow`(): Unit = runBlocking {
+        val transport = RecordingTransport()
+        val api: PtpSessionApi = PtpSessionApiImpl(transport)
+        transport.onCall = { call -> call.dataSink!!.invoke(ByteArray(9), 9) }
+        expectFailure<cn.alittlecookie.lutista.tether.transport.PtpProtocolException> { api.getPartialObject(1, 0, 8) }
+        transport.onCall = { call -> val b = ByteArray(1024 * 1024); repeat(5) { call.dataSink!!.invoke(b, b.size) } }
+        expectFailure<cn.alittlecookie.lutista.tether.transport.PtpProtocolException> { api.getThumb(1) }
+        expectFailure<cn.alittlecookie.lutista.tether.transport.PtpProtocolException> { api.getObjectInfo(1) }
+    }
+
+    @Test fun `liveview and discrete capture wire parameters match the final camera facts`() = runBlocking {
+        val transport = RecordingTransport()
+        val api: PtpSessionApi = PtpSessionApiImpl(transport)
+        api.liveView(true); api.liveView(false); api.liveViewFrame { _, _ -> }
+        val payload = cn.alittlecookie.lutista.tether.liveview.LiveViewFormat(432, 640, 77, 30).payload()
+        api.setLiveViewFormat(payload)
+        api.initiateCapture(true); api.movieRec(true); api.movieRec(false)
+        assertEquals(listOf(0x9412, 0x9412, 0x9706, 0x9415, 0x9404, 0x9404, 0x9404), transport.calls.map { it.op.code })
+        assertArrayEquals(longArrayOf(0x0D000010L), transport.calls[0].op.params)
+        assertArrayEquals(longArrayOf(0x0D000011L), transport.calls[1].op.params)
+        assertArrayEquals(longArrayOf(0x0D800011L), transport.calls[3].op.params)
+        assertSame(payload, transport.calls[3].dataOut)
+        transport.calls.takeLast(3).forEach { assertArrayEquals(longArrayOf(0x03000011L), it.op.params) }
     }
 
     private suspend inline fun <reified T : Throwable> expectFailure(noinline block: suspend () -> Unit): T {

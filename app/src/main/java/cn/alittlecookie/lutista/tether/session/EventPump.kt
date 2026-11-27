@@ -34,6 +34,7 @@ class EventPump(private val onBackpressure: (Stats) -> Unit = {}) {
         val discardedEventContainers: Long = 0L,
         val backpressure: Long = 0L,
         val unobserved: Long = 0L,
+        /** Explicitly acknowledged bare handles in the current PTP session only. */
         val processedHandles: Int = 0,
     )
 
@@ -148,7 +149,7 @@ class EventPump(private val onBackpressure: (Stats) -> Unit = {}) {
         event.generation == generation
     }
 
-    /** Returns false without changing replay history for an old notification. */
+    /** Returns false without changing current-session replay history for an old notification. */
     fun markProcessed(event: ObjectAdded): Boolean = synchronized(lock) {
         if (event.generation != generation) return@synchronized false
         markProcessed(event.handle)
@@ -164,22 +165,24 @@ class EventPump(private val onBackpressure: (Stats) -> Unit = {}) {
     }
 
     /**
-     * Call between drain batches, after stopping the old session. Remember every
-     * forwarded handle so residual events replayed by OpenSession are ignored.
-     * This is replay suppression, not a durable object identity or download index.
+     * Call after stopping the old session, before draining a new OpenSession.
+     * PTP handles are session-scoped: clear both forwarded and acknowledged handles,
+     * so the same number can identify a different object in the new session.
+     * Buffered old notifications are rejected by generation. Cross-session dedupe
+     * belongs to TransferEngine's stable object identity, never to these bare handles.
      */
     fun resetSession() {
         synchronized(lock) {
             generation += 1L
-            processed.addAll(seen)
             seen.clear()
+            processed.clear()
             lastDiscarded = 0
             mutableChanges.value = 0L
-            mutableStats.value = Stats(processedHandles = processed.size)
+            mutableStats.value = Stats()
         }
     }
 
-    /** New physical camera / re-numbering boundary: handles are not stable IDs. */
+    /** Explicit replay-state invalidation also makes buffered current notifications stale. */
     fun clearProcessed() {
         synchronized(lock) {
             generation += 1L

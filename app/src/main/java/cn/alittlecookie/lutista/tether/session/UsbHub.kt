@@ -257,6 +257,7 @@ class UsbHub internal constructor(
             context, spec.requestCode,
             Intent(spec.action).setPackage(spec.packageName).putExtra(EXTRA_NONCE, spec.nonce), spec.flags,
         )
+        @Suppress("NewApi")
         override fun usbDevice(intent: Intent): UsbDevice? =
             if (sdkInt >= Build.VERSION_CODES.TIRAMISU) intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java) else {
                 @Suppress("DEPRECATION")

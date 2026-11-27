@@ -18,7 +18,11 @@ data class TaskEntity(
     val errorMessage: String? = null,
     val source: String = "MANUAL",
     val createdAt: Long = System.currentTimeMillis(),
-    val completedAt: Long? = null
+    val completedAt: Long? = null,
+    /** Real original destination (including SAF URI); sourcePath remains a readable original file. */
+    val originalSourcePath: String? = null,
+    /** Stable TETHER import identity, persisted before publishing the processing task. */
+    val submissionKey: String? = null
 )
 
 enum class TaskStatus {
@@ -32,5 +36,6 @@ enum class TaskStatus {
 
 enum class TaskSource {
     MANUAL,
+    TETHER,
     MONITOR
 }

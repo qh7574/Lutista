@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Debug APK only. Explicit software fixture; never connects a camera. -->
+        <activity
+            android:name=".tether.debug.TetherUiSmokeActivity"
+            android:exported="true"
+            android:label="模拟联机 UI（无硬件）"
+            android:theme="@style/Theme.Lutista" />
+    </application>
+</manifest>

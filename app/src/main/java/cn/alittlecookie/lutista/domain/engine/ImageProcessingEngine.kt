@@ -36,76 +36,99 @@ class ImageProcessingEngine(
     @Volatile private var lut2Uploaded = false
     @Volatile private var lastLoggedEv = Float.NaN
 
-    fun processImageGpuFromBytes(
+    // A cache belongs to the native resource generation, never merely to this Kotlin instance.
+    private var cacheGeneration = Long.MIN_VALUE
+
+    fun invalidateLutCache() = vulkanGpuEngine.withSession {
+        clearUploadCache()
+        vulkanGpuEngine.invalidateResourceCache()
+    }
+
+    private fun clearUploadCache() {
+        lastLutPath1 = null
+        lastLutPath2 = null
+        lastLutSize1 = 0
+        lastLutSize2 = 0
+        lut1Uploaded = false
+        lut2Uploaded = false
+        lastCurveHash = null
+        cacheGeneration = Long.MIN_VALUE
+    }
+
+    /** Must be called inside the shared GPU session (uploads and dispatch are one transaction). */
+    private fun processBytesLocked(
         rgbaBytes: ByteArray, width: Int, height: Int, filter: FilterConfig
     ): Bitmap? {
         if (!vulkanGpuEngine.isAvailable) return null
+        if (cacheGeneration != vulkanGpuEngine.resourceGeneration) clearUploadCache()
         try {
             uploadLutIfNeeded(filter)
             uploadCurvesIfNeeded(filter)
-            val params = buildGpuParams(filter)
-            val inputCopy = rgbaBytes.copyOf()
-            val resultBytes = vulkanGpuEngine.processImage(inputCopy, width, height, params)
+            cacheGeneration = vulkanGpuEngine.resourceGeneration
+            val resultBytes = vulkanGpuEngine.processImage(rgbaBytes, width, height, buildGpuParams(filter))
                 ?: return null
-            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(resultBytes))
-            return bitmap
+            if (resultBytes.size.toLong() != width.toLong() * height * 4) return null
+            val result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            try {
+                result.copyPixelsFromBuffer(ByteBuffer.wrap(resultBytes))
+                return result
+            } catch (e: Exception) {
+                result.recycle()
+                throw e
+            }
         } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            logger.w(TAG, "GPU processing from bytes failed", e)
-            return null
+            clearUploadCache()
+            throw e
         }
     }
 
-    fun processImageGpuFromUri(
-        context: Context, uri: String, filter: FilterConfig
-    ): Bitmap? {
-        if (!vulkanGpuEngine.isAvailable) return null
-        try {
-            val inputBitmap = context.contentResolver.openInputStream(Uri.parse(uri))?.use { stream ->
+    fun processImageGpuFromBytes(
+        rgbaBytes: ByteArray, width: Int, height: Int, filter: FilterConfig
+    ): Bitmap? = try {
+        // Retain the existing borrowed-input contract: editor buffers can be reused after return.
+        val inputCopy = rgbaBytes.copyOf()
+        vulkanGpuEngine.withSession { processBytesLocked(inputCopy, width, height, filter) }
+    } catch (e: Exception) {
+        if (e is kotlinx.coroutines.CancellationException) throw e
+        logger.w(TAG, "GPU processing from bytes failed", e)
+        null
+    }
+
+    /** Non-blocking preview lease; owns neither bitmap nor bytes and never invokes a watermark. */
+    fun tryProcessLiveViewRgba(
+        rgbaBytes: ByteArray, width: Int, height: Int, filter: FilterConfig
+    ): Bitmap? = try {
+        vulkanGpuEngine.tryWithSession { processBytesLocked(rgbaBytes, width, height, filter) }
+    } catch (e: Exception) {
+        if (e is kotlinx.coroutines.CancellationException) throw e
+        logger.w(TAG, "Live-view GPU processing failed", e)
+        null
+    }
+
+    fun processImageGpuFromUri(context: Context, uri: String, filter: FilterConfig): Bitmap? {
+        var inputBitmap: Bitmap? = null
+        return try {
+            inputBitmap = context.contentResolver.openInputStream(Uri.parse(uri))?.use { stream ->
                 BitmapFactory.decodeStream(stream)
             }?.let { ExifUtils.correctOrientation(it, context, Uri.parse(uri)) }
-                ?: return null
-
-            val width = inputBitmap.width
-            val height = inputBitmap.height
-            val rgbaBytes = ByteArray(width * height * 4)
-            inputBitmap.copyPixelsToBuffer(ByteBuffer.wrap(rgbaBytes))
-
-            uploadLutIfNeeded(filter)
-            uploadCurvesIfNeeded(filter)
-            val params = buildGpuParams(filter)
-            val resultBytes = vulkanGpuEngine.processImage(rgbaBytes, width, height, params)
-            inputBitmap.recycle()
-
-            if (resultBytes == null) return null
-            val result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            result.copyPixelsFromBuffer(ByteBuffer.wrap(resultBytes))
-            return result
+            val input = inputBitmap ?: return null
+            processImagePreview(input, filter)
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             logger.w(TAG, "GPU processing from URI failed", e)
-            return null
+            null
+        } finally {
+            inputBitmap?.recycle()
         }
     }
 
     fun processImagePreview(bitmap: Bitmap, filter: FilterConfig): Bitmap {
-        if (!vulkanGpuEngine.isAvailable) {
-            throw IllegalStateException("Vulkan GPU not available")
-        }
-        val width = bitmap.width
-        val height = bitmap.height
-        val rgbaBytes = ByteArray(width * height * 4)
+        val rgbaBytes = ByteArray(Math.multiplyExact(Math.multiplyExact(bitmap.width, bitmap.height), 4))
         bitmap.copyPixelsToBuffer(ByteBuffer.wrap(rgbaBytes))
-
-        uploadLutIfNeeded(filter)
-        uploadCurvesIfNeeded(filter)
-        val params = buildGpuParams(filter)
-        val resultBytes = vulkanGpuEngine.processImage(rgbaBytes, width, height, params)
-            ?: throw IllegalStateException("GPU processing failed")
-
-        val result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        result.copyPixelsFromBuffer(ByteBuffer.wrap(resultBytes))
-        return result
+        return vulkanGpuEngine.withSession {
+            processBytesLocked(rgbaBytes, bitmap.width, bitmap.height, filter)
+                ?: throw IllegalStateException("Vulkan GPU unavailable or processing failed")
+        }
     }
 
     fun processImageWithUnifiedLut(bitmap: Bitmap, unifiedLut: UnifiedLut): Bitmap {
@@ -126,7 +149,7 @@ class ImageProcessingEngine(
             if (filter.lutPath1 != null) {
                 val lut = lutProcessor.loadLutForGpu(filter.lutPath1, targetSize)
                 if (lut != null) {
-                    vulkanGpuEngine.uploadLut(lut, 0)
+                    check(vulkanGpuEngine.uploadLut(lut, 0)) { "LUT slot 0 upload failed" }
                     lut1Uploaded = true
                 }
             }
@@ -138,7 +161,7 @@ class ImageProcessingEngine(
             if (filter.lutPath2 != null) {
                 val lut = lutProcessor.loadLutForGpu(filter.lutPath2, targetSize)
                 if (lut != null) {
-                    vulkanGpuEngine.uploadLut(lut, 1)
+                    check(vulkanGpuEngine.uploadLut(lut, 1)) { "LUT slot 1 upload failed" }
                     lut2Uploaded = true
                 }
             }
@@ -147,13 +170,13 @@ class ImageProcessingEngine(
         }
     }
 
-    @Volatile private var lastCurveHash: Int = 0
+    @Volatile private var lastCurveHash: Int? = null
 
     private fun uploadCurvesIfNeeded(filter: FilterConfig) {
         val curveData = buildCurveData(filter.curveConfig)
         val hash = curveData.contentHashCode()
         if (hash != lastCurveHash) {
-            vulkanGpuEngine.uploadCurves(curveData)
+            check(vulkanGpuEngine.uploadCurves(curveData)) { "Curve upload failed" }
             lastCurveHash = hash
         }
     }
@@ -219,7 +242,7 @@ class ImageProcessingEngine(
         h = 31 * h + grain.blueChannelRatio.hashCode()
         h = 31 * h + grain.channelCorrelation.hashCode()
         h = 31 * h + grain.colorPreservation.hashCode()
-        // `and 0x7FFFFFFF` instead of Math.abs() so Int.MIN_VALUE stays positive.
+        // `and 0x7FFFFFFF` instead of Math.abs() to keep Int.MIN_VALUE positive.
         return ((h and 0x7FFFFFFF) % 1000).toFloat() / 1000f
     }
 
@@ -228,9 +251,9 @@ class ImageProcessingEngine(
         var idx = 0
         params[idx++] = if (lut1Uploaded) filter.lutConcentration1 else 0f
         params[idx++] = if (lut2Uploaded) filter.lutConcentration2 else 0f
-        val globalLutSize = settingsManager.getLutPrecisionSync().toFloat()
-        params[idx++] = globalLutSize
-        params[idx++] = globalLutSize
+        // Use the sizes snapshotted by this transaction; preferences may change during dispatch.
+        params[idx++] = lastLutSize1.toFloat()
+        params[idx++] = lastLutSize2.toFloat()
         // 曝光滑杆存的是 EV*10，这里换算成真正的档位后交给 shader（gain = 2^EV）。
         // 打一条只在数值变化时输出的日志，方便用户回传的 logcat 里直接看到实际档位。
         val exposureEv = filter.exposure / 10f

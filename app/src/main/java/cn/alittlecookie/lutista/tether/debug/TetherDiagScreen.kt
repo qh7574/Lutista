@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -55,6 +57,7 @@ fun TetherDiagScreen(viewModel: TetherDiagViewModel) {
     val stats by runtime.stats.collectAsStateWithLifecycle()
     val config by runtime.configState.collectAsStateWithLifecycle()
     val message by runtime.message.collectAsStateWithLifecycle()
+    val connectionNotice by runtime.connectionNotice.collectAsStateWithLifecycle()
     val logLines by runtime.logLines.collectAsStateWithLifecycle()
     val transportOpen by runtime.transportOpen.collectAsStateWithLifecycle()
     val transportFatal by runtime.transportFatal.collectAsStateWithLifecycle()
@@ -71,6 +74,16 @@ fun TetherDiagScreen(viewModel: TetherDiagViewModel) {
     val visibleLogs = remember(logLines) { logLines.takeLast(VISIBLE_LOG_LINES) }
 
     MaterialTheme {
+        connectionNotice?.let { notice ->
+            AlertDialog(
+                onDismissRequest = { runtime.dismissConnectionNotice() },
+                title = { Text(notice.title) },
+                text = { Text(notice.message) },
+                confirmButton = {
+                    TextButton(onClick = { runtime.dismissConnectionNotice() }) { Text("知道了") }
+                },
+            )
+        }
         Surface(modifier = Modifier.fillMaxSize()) {
             LazyColumn(
                 modifier = Modifier.fillMaxSize().safeDrawingPadding(),

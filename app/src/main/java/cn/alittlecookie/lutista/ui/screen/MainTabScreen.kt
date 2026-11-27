@@ -62,7 +62,12 @@ fun MainTabScreen(
     onRequestedPageHandled: () -> Unit = {},
     onSettledPageChange: (Int) -> Unit = {},
     recipeSubTab: Int = 0,
-    onRecipeSubTabChange: (Int) -> Unit = {}
+    onRecipeSubTabChange: (Int) -> Unit = {},
+    tetherEnabled: Boolean = false,
+    tetherBusy: Boolean = false,
+    tetherSummary: String = "未连接",
+    onTetherEnabledChange: (Boolean) -> Unit = {},
+    onTetherClick: () -> Unit = {},
 ) {
     val pages = MainPage.entries
     val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { 3 })
@@ -141,7 +146,12 @@ fun MainTabScreen(
                 0 -> HomeScreen(
                     launchPicker = launchPicker,
                     onMonitorFolderClick = onMonitorFolderClick,
-                    onOutputFolderClick = onOutputFolderClick
+                    onOutputFolderClick = onOutputFolderClick,
+                    tetherEnabled = tetherEnabled,
+                    tetherBusy = tetherBusy,
+                    tetherSummary = tetherSummary,
+                    onTetherEnabledChange = onTetherEnabledChange,
+                    onTetherClick = onTetherClick,
                 )
                 1 -> RecipeRoomScreen(
                     bottomBarHeight = paddingValues.calculateBottomPadding(),

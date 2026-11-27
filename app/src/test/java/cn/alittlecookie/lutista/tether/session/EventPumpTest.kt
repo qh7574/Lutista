@@ -63,20 +63,88 @@ class EventPumpTest {
         assertEquals(0L, pump.stats.value.unknown)
     }
 
-    @Test fun `reset remembers forwarded and explicitly processed handles across sessions`() = runBlocking {
+    @Test fun `forwarded but unacknowledged handles are retried after reconnect`() = runBlocking {
         withTimeout(5_000) {
             val pump = EventPump()
             val first = async(start = CoroutineStart.UNDISPATCHED) { pump.events.take(1).toList() }
-            pump.accept(listOf(added(31)))
-            assertEquals(31L, first.await().single().handle)
-            pump.markProcessed(32)
+            pump.accept(listOf(added(31), added(31)))
+            val oldNotification = first.await().single()
+            assertEquals(31L, oldNotification.handle)
+            assertEquals(1L, pump.stats.value.duplicates)
+            assertEquals(0, pump.stats.value.processedHandles)
+
             pump.resetSession()
+            assertFalse(pump.isCurrent(oldNotification))
+            assertEquals(0, pump.stats.value.processedHandles)
             val second = async(start = CoroutineStart.UNDISPATCHED) { pump.events.take(1).toList() }
-            pump.accept(listOf(added(31), added(32), added(33)))
-            assertEquals(33L, second.await().single().handle)
-            assertEquals(2L, pump.stats.value.replayed)
+            pump.accept(listOf(added(31), added(31)))
+            val retry = second.await().single()
+            assertEquals(31L, retry.handle)
+            assertEquals(oldNotification.generation + 1L, retry.generation)
+            assertTrue(pump.isCurrent(retry))
+            assertEquals(1L, pump.stats.value.duplicates)
+            assertEquals(0L, pump.stats.value.replayed)
             assertEquals(1L, pump.stats.value.objectAdded)
+            assertEquals(0, pump.stats.value.processedHandles)
+        }
+    }
+
+    @Test fun `event and legacy acknowledgments suppress handles only within the current session`() = runBlocking {
+        withTimeout(5_000) {
+            val pump = EventPump()
+            val received = async(start = CoroutineStart.UNDISPATCHED) { pump.events.take(1).toList() }
+            pump.accept(listOf(added(32)))
+            assertTrue(pump.markProcessed(received.await().single()))
+            pump.markProcessed(33)
+            pump.accept(listOf(added(32), added(33)))
+            assertEquals(1L, pump.stats.value.objectAdded)
+            assertEquals(1L, pump.stats.value.duplicates)
+            assertEquals(1L, pump.stats.value.replayed)
             assertEquals(2, pump.stats.value.processedHandles)
+        }
+    }
+
+    @Test fun `new session emits previously acknowledged handles with a new generation`() = runBlocking {
+        withTimeout(5_000) {
+            val pump = EventPump()
+            val first = async(start = CoroutineStart.UNDISPATCHED) { pump.events.take(1).toList() }
+            pump.accept(listOf(added(32)))
+            val oldNotification = first.await().single()
+            assertTrue(pump.markProcessed(oldNotification))
+            pump.markProcessed(33)
+            assertEquals(2, pump.stats.value.processedHandles)
+
+            pump.resetSession()
+            assertEquals(EventPump.Stats(), pump.stats.value)
+            assertFalse(pump.isCurrent(oldNotification))
+            assertFalse(pump.markProcessed(oldNotification))
+            val second = async(start = CoroutineStart.UNDISPATCHED) { pump.events.take(2).toList() }
+            pump.accept(listOf(added(32), added(33), added(32)))
+            val current = second.await()
+            assertEquals(listOf(32L, 33L), current.map { it.handle })
+            assertTrue(current.all { it.generation == oldNotification.generation + 1L && pump.isCurrent(it) })
+            assertFalse(pump.markProcessed(oldNotification))
+            assertEquals(0, pump.stats.value.processedHandles)
+            assertEquals(0L, pump.stats.value.replayed)
+            assertEquals(1L, pump.stats.value.duplicates)
+            assertEquals(2L, pump.stats.value.objectAdded)
+            assertTrue(pump.markProcessed(current[0]))
+            assertTrue(pump.markProcessed(current[1]))
+            assertEquals(2, pump.stats.value.processedHandles)
+        }
+    }
+
+    @Test fun `unobserved notification remains retryable after reconnect`() = runBlocking {
+        withTimeout(5_000) {
+            val pump = EventPump()
+            pump.accept(listOf(added(35)))
+            assertEquals(1L, pump.stats.value.unobserved)
+            pump.resetSession()
+            val received = async(start = CoroutineStart.UNDISPATCHED) { pump.events.take(1).toList() }
+            pump.accept(listOf(added(35)))
+            assertEquals(35L, received.await().single().handle)
+            assertEquals(0L, pump.stats.value.replayed)
+            assertEquals(0, pump.stats.value.processedHandles)
         }
     }
 
@@ -133,13 +201,23 @@ class EventPumpTest {
             assertEquals(listOf(false, false, true), acknowledgments)
             assertEquals(1, pump.stats.value.processedHandles)
             assertEquals(0L, pump.stats.value.replayed)
+
             pump.resetSession()
+            assertEquals(0, pump.stats.value.processedHandles)
+            assertFalse(pump.markProcessed(received[2]))
+            val next = async(start = CoroutineStart.UNDISPATCHED) { pump.events.take(1).toList() }
             pump.accept(listOf(added(62)))
-            assertEquals(1L, pump.stats.value.replayed)
+            val current = next.await().single()
+            assertEquals(62L, current.handle)
+            assertEquals(received[2].generation + 1L, current.generation)
+            assertTrue(pump.isCurrent(current))
+            assertEquals(0L, pump.stats.value.replayed)
+            assertEquals(1L, pump.stats.value.objectAdded)
+            assertEquals(0, pump.stats.value.processedHandles)
         }
     }
 
-    @Test fun `reset rejects buffered old acknowledgments while retaining replay suppression`() = runBlocking {
+    @Test fun `reset rejects buffered old acknowledgments and retries their unprocessed handles`() = runBlocking {
         withTimeout(5_000) {
             val pump = EventPump()
             val entered = CompletableDeferred<Unit>()
@@ -148,7 +226,7 @@ class EventPumpTest {
             val received = mutableListOf<EventPump.ObjectAdded>()
             val acknowledgments = mutableListOf<Boolean>()
             val collector = launch(start = CoroutineStart.UNDISPATCHED) {
-                pump.events.take(3).collect { notification ->
+                pump.events.take(4).collect { notification ->
                     received.add(notification)
                     if (received.size == 1) { entered.complete(Unit); release.await() }
                     acknowledgments.add(pump.markProcessed(notification))
@@ -164,15 +242,33 @@ class EventPumpTest {
             release.complete(Unit)
             oldAcknowledged.await()
             assertEquals(listOf(false, false), acknowledgments)
-            assertEquals(2, pump.stats.value.processedHandles)
+            assertEquals(0, pump.stats.value.processedHandles)
             pump.accept(listOf(added(72), added(73)))
             collector.join()
-            assertEquals(listOf(71L, 72L, 73L), received.map { it.handle })
+            assertEquals(listOf(71L, 72L, 72L, 73L), received.map { it.handle })
             assertFalse(pump.isCurrent(received[1]))
             assertTrue(pump.isCurrent(received[2]))
-            assertEquals(listOf(false, false, true), acknowledgments)
-            assertEquals(1L, pump.stats.value.replayed)
-            assertEquals(3, pump.stats.value.processedHandles)
+            assertTrue(pump.isCurrent(received[3]))
+            assertEquals(listOf(false, false, true, true), acknowledgments)
+            assertEquals(0L, pump.stats.value.replayed)
+            assertEquals(2, pump.stats.value.processedHandles)
+            pump.accept(listOf(added(72), added(73)))
+            assertEquals(2L, pump.stats.value.duplicates)
+
+            pump.resetSession()
+            assertEquals(EventPump.Stats(), pump.stats.value)
+            assertFalse(pump.markProcessed(received[2]))
+            assertFalse(pump.markProcessed(received[3]))
+            val next = async(start = CoroutineStart.UNDISPATCHED) { pump.events.take(2).toList() }
+            pump.accept(listOf(added(72), added(73)))
+            val current = next.await()
+            assertEquals(listOf(72L, 73L), current.map { it.handle })
+            assertTrue(current.all { it.generation == received[2].generation + 1L && pump.isCurrent(it) })
+            assertEquals(0L, pump.stats.value.replayed)
+            assertEquals(0, pump.stats.value.processedHandles)
+            assertTrue(pump.markProcessed(current[0]))
+            assertFalse(pump.markProcessed(received[2]))
+            assertEquals(1, pump.stats.value.processedHandles)
         }
     }
 

@@ -23,14 +23,20 @@ class TetherRuntime(
     private val drivers: CameraDriverFactory,
     val config: TetherDebugConfig,
     val logger: TetherDiagLogger,
+    private val connectionLease: TetherConnectionLease = TetherConnectionLease.global,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val driverLock = Mutex()
+    private val connectionLifecycle = Mutex()
     private val connecting = AtomicBoolean(false)
     private val disposed = AtomicBoolean(false)
     private var autoConnectRequested = false
     private var activeTarget: UsbTarget? = null
     private var active: PtpUsbDriver? = null
+    private val mutableDriver = MutableStateFlow<PtpUsbDriver?>(null)
+    /** A process-owned repository observes this; UI never creates a second USB session. */
+    val driver = mutableDriver.asStateFlow()
+    private var objectEventConsumer: (suspend (PtpUsbDriver, EventPump.ObjectAdded) -> Unit)? = null
     private val bindings = mutableListOf<Job>()
     private val mutableState = MutableStateFlow(TetherState())
     val state = mutableState.asStateFlow()
@@ -46,6 +52,10 @@ class TetherRuntime(
     val stats = mutableStats.asStateFlow()
     private val mutableMessage = MutableStateFlow("")
     val message = mutableMessage.asStateFlow()
+    private val mutableConnectionNotice = MutableStateFlow<TetherConnectionNotice?>(null)
+    val connectionNotice = mutableConnectionNotice.asStateFlow()
+
+    fun dismissConnectionNotice() { mutableConnectionNotice.value = null }
     private val mutableLogs = MutableStateFlow<List<String>>(emptyList())
     val logLines = mutableLogs.asStateFlow()
     val configState = config.state.stateIn(scope, SharingStarted.Eagerly, TetherDebugConfig.Snapshot())
@@ -63,24 +73,43 @@ class TetherRuntime(
                     is UsbHub.Event.Detached -> if (activeTarget?.device?.deviceName == event.device.deviceName) {
                         disconnect(CloseReason.DETACHED)
                     }
-                    is UsbHub.Event.Attached -> if (autoConnectRequested) launch { connect() }
+                    is UsbHub.Event.Attached -> if (autoConnectRequested && objectEventConsumer == null) launch { connect() }
                     is UsbHub.Event.PermissionResult -> logger.log("permission", "granted=" + event.granted)
                 }
             }
         }
     }
 
+    /** Register before connect so OpenSession-drained events cannot be mistaken for diagnostics. */
+    fun setObjectEventConsumer(consumer: suspend (PtpUsbDriver, EventPump.ObjectAdded) -> Unit) {
+        check(!disposed.get()) { "Tether runtime is disposed" }
+        objectEventConsumer = consumer
+        autoConnectRequested = false
+    }
+
     suspend fun connect(): ConnectOutcome {
         check(!disposed.get()) { "Tether runtime is disposed" }
         if (!connecting.compareAndSet(false, true)) return ConnectOutcome.AlreadyConnecting
-        autoConnectRequested = true
         try {
+            return connectionLifecycle.withLock { connectExclusively() }
+        } finally { connecting.set(false) }
+    }
+
+    private suspend fun connectExclusively(): ConnectOutcome {
+        autoConnectRequested = objectEventConsumer == null
+        var acquiredLease = false
+        var keepLease = false
+        try {
+            acquiredLease = connectionLease.tryAcquire(this)
+            check(acquiredLease) { "另一个联机或诊断会话正在使用 USB，请先关闭该会话" }
             diagnostics.syncConfig()
-            val device = hub.enumerate().firstOrNull()
+            mutableConnectionNotice.value = null
+            val devices = hub.enumerate()
+            val device = devices.firstOrNull { !it.isVerifiedLumixMtpMode() && it.hasTetherBulkInterface() }
             if (device == null) {
-                mutableState.value = TetherState(TetherPhase.NotAttached, message = "未检测到相机，请连接并选择 PC(Tether)")
-                mutableMessage.value = mutableState.value.message
-                return ConnectOutcome.NotAttached
+                val notice = if (devices.any { it.isVerifiedLumixMtpMode() })
+                    TetherConnectionNotice.MtpUsbMode else TetherConnectionNotice.NoUsableUsb
+                return rejectConnection(notice)
             }
             val target = UsbTarget(device, hub.hasPermission(device))
             val driver = driverLock.withLock {
@@ -88,21 +117,46 @@ class TetherRuntime(
                     active?.disconnect(CloseReason.RECONNECT)
                     bindings.forEach { it.cancel() }; bindings.clear()
                     active = drivers.create(target, scope) as? PtpUsbDriver
+                    mutableDriver.value = active
                     activeTarget = target
                     active?.let { bind(it) }
                 }
                 active
-            } ?: return ConnectOutcome.NotAttached
+            } ?: return rejectConnection(TetherConnectionNotice.NoUsableUsb)
             // USB addresses may be reused after detach, while Android revokes permission.
             // Keep this driver's history but pass the freshly enumerated permission snapshot.
-            return driver.connect(target).also { mutableMessage.value = it.toString() }
+            return driver.connect(target).also { result ->
+                keepLease = result == ConnectOutcome.Connected
+                if (result == ConnectOutcome.WrongMode) {
+                    mutableConnectionNotice.value = TetherConnectionNotice.WrongPtpMode
+                    mutableMessage.value = TetherConnectionNotice.WrongPtpMode.message
+                } else { mutableMessage.value = result.toString() }
+            }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Throwable) {
             mutableMessage.value = failure.javaClass.simpleName + ": " + failure.message
             logger.log("runtime", "connectFailure=" + mutableMessage.value)
             return ConnectOutcome.Failed(failure)
-        } finally { connecting.set(false) }
+        } finally {
+            if (acquiredLease && !keepLease) withContext(NonCancellable) {
+                try {
+                    driverLock.withLock {
+                        if (active?.session?.transportOpen == true) active?.disconnect(CloseReason.FATAL)
+                    }
+                } finally { connectionLease.release(this@TetherRuntime) }
+            }
+        }
+    }
+
+    private suspend fun rejectConnection(notice: TetherConnectionNotice): ConnectOutcome {
+        // A prior connection may still be winding down after a USB broadcast. Always release it.
+        driverLock.withLock { active?.disconnect(CloseReason.RECONNECT) }
+        mutableConnectionNotice.value = notice
+        mutableState.value = TetherState(TetherPhase.NotAttached, message = notice.message)
+        mutableMessage.value = notice.message
+        logger.log("connect", "blockedBeforeOpen=true; notice=" + notice.name + "; source=" + notice.source)
+        return ConnectOutcome.NotAttached
     }
 
     private fun bind(driver: PtpUsbDriver) {
@@ -113,14 +167,24 @@ class TetherRuntime(
             while (isActive && active === driver) {
                 mutableTransportFatal.value = driver.session.transportFatal
                 mutableTransportOpen.value = driver.session.transportOpen
+                if (!connecting.get() && driver.session.transportOpen == false &&
+                    driver.session.state.value.phase in setOf(TetherPhase.Fatal, TetherPhase.Detached, TetherPhase.Idle)) {
+                    connectionLease.release(this@TetherRuntime)
+                }
                 delay(100)
             }
         }
         bindings += scope.launch(start = CoroutineStart.UNDISPATCHED) { driver.session.eventPump.stats.collect { mutableStats.value = it } }
         bindings += scope.launch(start = CoroutineStart.UNDISPATCHED) {
             driver.session.events.collect { added ->
-                logger.log("EVENT", "consumer=diagnostic_observer; handle=" + added.handle)
-                driver.session.eventPump.markProcessed(added)
+                val consumer = objectEventConsumer
+                if (consumer != null) {
+                    // The formal consumer acknowledges only after durable registration/handling.
+                    consumer(driver, added)
+                } else {
+                    logger.log("EVENT", "consumer=diagnostic_observer; handle=" + added.handle)
+                    driver.session.eventPump.markProcessed(added)
+                }
             }
         }
     }
@@ -130,9 +194,12 @@ class TetherRuntime(
         mutableMessage.value = "USB 会话已关闭，原因：" + reason
     }
 
-    private suspend fun closeConnection(reason: CloseReason) {
-        if (reason != CloseReason.DETACHED) autoConnectRequested = false
-        driverLock.withLock { active?.disconnect(reason) }
+    private suspend fun closeConnection(reason: CloseReason) = withContext(NonCancellable) {
+        connectionLifecycle.withLock {
+            if (reason != CloseReason.DETACHED || objectEventConsumer != null) autoConnectRequested = false
+            try { driverLock.withLock { active?.disconnect(reason) } }
+            finally { connectionLease.release(this@TetherRuntime) }
+        }
     }
 
     suspend fun reprobe() {
@@ -185,16 +252,23 @@ class TetherRuntime(
                         override val discardedEventContainers: Int get() = closedSession?.discardedEventContainers ?: 0
                         override fun collectPendingEvents(): List<PtpEvent> = emptyList()
                     }
-                    val worker = PtpScheduler()
-                    worker.start()
-                    try {
-                        worker.run {
-                            val connection = hub.openConnection(device) ?: return@run TetherDiagnostics.FaultResult(
-                                "claim_fail", TetherDiagnostics.FaultStatus.Blocked, "permission/device unavailable; no claim attempted")
-                            try { diagnostics.runClaimFailureFixture(device, connection, guard) }
-                            finally { connection.close() }
+                    connectionLifecycle.withLock {
+                        check(connectionLease.tryAcquire(this@TetherRuntime)) {
+                            "另一个联机或诊断会话正在使用 USB，请先关闭该会话"
                         }
-                    } finally { worker.close() }
+                        val worker = PtpScheduler()
+                        try {
+                            worker.start()
+                            worker.run {
+                                val connection = hub.openConnection(device) ?: return@run TetherDiagnostics.FaultResult(
+                                    "claim_fail", TetherDiagnostics.FaultStatus.Blocked, "permission/device unavailable; no claim attempted")
+                                try { diagnostics.runClaimFailureFixture(device, connection, guard) }
+                                finally { connection.close() }
+                            }
+                        } finally {
+                            try { worker.close() } finally { connectionLease.release(this@TetherRuntime) }
+                        }
+                    }
                 }
                 else -> throw IllegalArgumentException("Unknown diagnostic action")
             }

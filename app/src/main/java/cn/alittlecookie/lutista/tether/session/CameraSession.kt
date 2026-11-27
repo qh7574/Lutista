@@ -137,8 +137,9 @@ class CameraSession(
                         var response = commands.openSession(timeoutMs = remaining(deadline, 1_000))
                         checkConnecting(deadline)
                         if (response.code == 0x201E && preflight.preflightFailure == null && !truth.isFatal) {
-                            commands.closeSession(remaining(deadline, 1_000))
+                            val closeResponse = commands.closeSession(remaining(deadline, 1_000))
                             checkConnecting(deadline)
+                            requireOk(closeResponse, "CloseSession")
                             response = commands.openSession(timeoutMs = remaining(deadline, 1_000))
                             checkConnecting(deadline)
                         }

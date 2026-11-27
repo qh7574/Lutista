@@ -23,7 +23,7 @@
     <!-- 前台服务 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-    <!-- TetherService 交付前仅预留权限，不启动 connectedDevice 前台服务。 -->
+    <!-- USB 权限获准后启动联机 connectedDevice 前台服务。 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
@@ -67,6 +67,12 @@
             android:name=".service.FileMonitorService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- 联机运行期由进程级仓库持有，页面旋转不会释放连接。 -->
+        <service
+            android:name=".tether.service.TetherService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
         <!-- 文件分享 (logcat导出等) -->
         <provider

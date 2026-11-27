@@ -12,6 +12,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import android.widget.Toast
+import cn.alittlecookie.lutista.tether.repository.TetherRepository
+import cn.alittlecookie.lutista.tether.ui.TetherRoute
+import cn.alittlecookie.lutista.tether.ui.TetherUiAction
+import cn.alittlecookie.lutista.tether.ui.TetherConnectionDialog
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -87,10 +93,13 @@ sealed interface Screen : NavKey {
 
     @Serializable
     data object ThemeSettings : Screen
+
+    @Serializable
+    data class Tether(val initialTab: String? = null, val requestId: Long = 0L) : Screen
 }
 
 @Composable
-fun MainScreen() {
+fun MainScreen(openTetherRequestId: Long = 0L) {
     val settingsManager: SettingsManager = koinInject()
 
     var themeMode by remember { mutableStateOf(settingsManager.getThemeModeSync()) }
@@ -127,14 +136,18 @@ fun MainScreen() {
         paletteStyle = paletteStyle,
         colorSpec = colorSpec
     ) {
-        MainScreenContent()
+        MainScreenContent(openTetherRequestId)
     }
 }
 
 @Composable
-private fun MainScreenContent() {
+private fun MainScreenContent(openTetherRequestId: Long = 0L) {
     val vulkanGpuEngine: VulkanGpuEngine = koinInject()
     val context = LocalContext.current
+    val tetherRepository: TetherRepository = koinInject()
+    val tetherState by tetherRepository.uiState.collectAsState()
+    var lastTetherOpenRequestId by rememberSaveable { mutableLongStateOf(0L) }
+    var tetherRequestSeq by rememberSaveable { mutableLongStateOf(System.currentTimeMillis()) }
 
     var showVulkanDialog by remember { mutableStateOf(false) }
     // 当前主 Tab 索引的**唯一真值**。刻意放在 NavDisplay 之外，并且用 rememberSaveable：
@@ -183,6 +196,16 @@ private fun MainScreenContent() {
     fun pushRoute(screen: Screen) {
         if (backStack.lastOrNull() == screen) return
         backStack.add(screen)
+    }
+
+    LaunchedEffect(openTetherRequestId) {
+        if (openTetherRequestId != 0L && openTetherRequestId != lastTetherOpenRequestId) {
+            lastTetherOpenRequestId = openTetherRequestId
+            if (backStack.lastOrNull() !is Screen.Tether) {
+                tetherRequestSeq = maxOf(tetherRequestSeq + 1L, openTetherRequestId)
+                pushRoute(Screen.Tether(initialTab = "gallery", requestId = tetherRequestSeq))
+            }
+        }
     }
 
     /**
@@ -346,7 +369,7 @@ private fun MainScreenContent() {
         backStack = backStack,
         // 系统返回键 / 预测性返回 / 侧滑关闭都汇到这里（swipeDismiss 的 onCommit 就是 onBack）。
         // 具体出栈与 Tab 落点判定全部收在 popRoute() 里，栈底保护也在那里。
-        onBack = { popRoute() },
+        onBack = { if (backStack.lastOrNull() !is Screen.Tether) popRoute() },
         transition = navTransition,
         effects = navEffects
     ) {
@@ -373,7 +396,20 @@ private fun MainScreenContent() {
                 onSettledPageChange = { mainTab = it },
                 recipeSubTab = recipeSubTab,
                 onRecipeSubTabChange = { recipeSubTab = it },
-                onThemeSettingsClick = { pushRoute(Screen.ThemeSettings) }
+                onThemeSettingsClick = { pushRoute(Screen.ThemeSettings) },
+                tetherEnabled = tetherState.enabled,
+                tetherBusy = tetherState.busy,
+                tetherSummary = listOfNotNull(tetherState.cameraName.takeIf { tetherState.connected }, tetherState.connectionSummary,
+                    tetherState.todayJpegCount?.let { "今日 $it 张 JPEG" }).joinToString(" · "),
+                onTetherEnabledChange = { tetherRepository.onAction(TetherUiAction.SetEnabled(it)) },
+                onTetherClick = {
+                    if (tetherState.connected && !tetherState.busy) {
+                        tetherRequestSeq += 1L
+                        pushRoute(Screen.Tether(initialTab = "gallery", requestId = tetherRequestSeq))
+                    } else if (!tetherState.busy) {
+                        Toast.makeText(context, "请先连接相机，并选择 PC(Tether)", Toast.LENGTH_SHORT).show()
+                    }
+                },
             )
         }
         entry<Screen.PhotoProcess>(swipeDismiss = NavSwipeDirection.LeftToRight) { screen ->
@@ -403,6 +439,22 @@ private fun MainScreenContent() {
                 onBackClick = { popRoute() }
             )
         }
+        // Recording/style exit guards live inside TetherScreen; a nav swipe must never bypass them.
+        entry<Screen.Tether>(swipeDismiss = NavSwipeDirection.None) { screen ->
+            TetherRoute(
+                onBack = { popRoute() },
+                initialTab = screen.initialTab,
+                onOpenGlobalFilterSettings = {
+                    popRoute()
+                    mainTab = TAB_HOME
+                    pendingMainTab = TAB_HOME
+                    Toast.makeText(context, "请在主页选择全局滤镜", Toast.LENGTH_LONG).show()
+                },
+            )
+        }
+    }
+    if (backStack.lastOrNull() !is Screen.Tether) {
+        TetherConnectionDialog(tetherState.dialog, tetherRepository::onAction)
     }
 }
 
@@ -421,6 +473,7 @@ private fun MainScreenContent() {
 internal fun mainTabAfterPop(route: NavKey?): Int? = when (route) {
     is Screen.FilterEditor, is Screen.WatermarkEditor -> TAB_RECIPE
     is Screen.ThemeSettings -> TAB_SETTINGS
+    is Screen.Tether -> TAB_HOME
     // Main / PhotoProcess / null / 未知 key：不需要纠正 Tab
     //（PhotoProcess 从主页进入，回来后仍停在原 Tab）。
     else -> null

@@ -8,6 +8,8 @@ import android.os.IBinder
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
@@ -20,6 +22,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
@@ -35,6 +38,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -53,6 +58,7 @@ import kotlinx.coroutines.launch
 import org.koin.compose.koinInject
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
+import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
 import top.yukonga.miuix.kmp.basic.DropdownItem
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
@@ -75,7 +81,12 @@ import top.yukonga.miuix.kmp.utils.overScrollVertical
 fun HomeScreen(
     launchPicker: () -> Unit = {},
     onMonitorFolderClick: () -> Unit = {},
-    onOutputFolderClick: () -> Unit = {}
+    onOutputFolderClick: () -> Unit = {},
+    tetherEnabled: Boolean = false,
+    tetherBusy: Boolean = false,
+    tetherSummary: String = "未连接",
+    onTetherEnabledChange: (Boolean) -> Unit = {},
+    onTetherClick: () -> Unit = {},
 ) {
     val filterRepository: FilterRepository = koinInject()
     val watermarkRepository: WatermarkRepository = koinInject()
@@ -87,7 +98,6 @@ fun HomeScreen(
     var processedCount by remember { mutableIntStateOf(settingsManager.getProcessedCountSync()) }
     var pendingStartAfterPathSelect by remember { mutableStateOf(false) }
 
-    var isCameraMode by remember { mutableStateOf(false) }
     var onlyNewFiles by remember { mutableStateOf(settingsManager.getOnlyNewFilesSync()) }
 
     var selectedFilterIndex by remember { mutableIntStateOf(0) }
@@ -246,7 +256,9 @@ fun HomeScreen(
             StatusSection(
                 isMonitorRunning = isMonitorRunning,
                 processedCount = processedCount,
-                isCameraMode = isCameraMode,
+                tetherEnabled = tetherEnabled,
+                tetherBusy = tetherBusy,
+                tetherSummary = tetherSummary,
                 onMonitorToggle = {
                     if (!isMonitorRunning) {
                         val noFilter = selectedFilterIndex == 0
@@ -273,8 +285,8 @@ fun HomeScreen(
                         }
                     }
                 },
-                onCameraModeChange = { isCameraMode = it },
-                onCameraClick = { /* TODO: 打开联机页面 */ },
+                onTetherEnabledChange = onTetherEnabledChange,
+                onTetherClick = onTetherClick,
                 launchPicker = launchPicker
             )
         }
@@ -332,149 +344,64 @@ fun HomeScreen(
 private fun StatusSection(
     isMonitorRunning: Boolean,
     processedCount: Int,
-    isCameraMode: Boolean,
+    tetherEnabled: Boolean,
+    tetherBusy: Boolean,
+    tetherSummary: String,
     onMonitorToggle: () -> Unit,
-    onCameraModeChange: (Boolean) -> Unit,
-    onCameraClick: () -> Unit,
-    launchPicker: () -> Unit = {}
+    onTetherEnabledChange: (Boolean) -> Unit,
+    onTetherClick: () -> Unit,
+    launchPicker: () -> Unit = {},
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(IntrinsicSize.Min),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
+    val dark = colorScheme.background.luminance() < .5f
+    val activeText = if (dark) colorScheme.onPrimaryContainer else Color(0xFF1A3825)
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Card(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxHeight(),
-            colors = CardDefaults.defaultColors(
-                color = if (isMonitorRunning) {
-                    Color(0xFFDFFAE4)
-                } else {
-                    colorScheme.surfaceVariant
-                }
-            ),
+            modifier = Modifier.fillMaxWidth().height(120.dp),
+            colors = CardDefaults.defaultColors(color = if (isMonitorRunning) {
+                if (dark) colorScheme.primaryContainer else Color(0xFFDFFAE4)
+            } else colorScheme.surfaceVariant),
             onClick = onMonitorToggle,
-            showIndication = true
+            showIndication = true,
         ) {
-            Box(modifier = Modifier.fillMaxSize()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .offset(30.dp, 36.dp),
-                    contentAlignment = Alignment.BottomEnd
-                ) {
-                    Icon(
-                        modifier = Modifier.size(170.dp),
-                        imageVector = if (isMonitorRunning) Icons.Rounded.AutoAwesome else MiuixIcons.Demibold.Close2,
-                        tint = if (isMonitorRunning) {
-                            Color(0xFF36D167).copy(alpha = 0.8f)
-                        } else {
-                            Color(0xFFFF4444).copy(alpha = 0.2f)
-                        },
-                        contentDescription = null
-                    )
-                }
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(all = 16.dp)
-                ) {
-                    Text(
-                        modifier = Modifier.fillMaxWidth(),
-                        text = if (isMonitorRunning) "实时处理已启动" else "实时处理未启动",
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (isMonitorRunning) {
-                            Color(0xFF1A3825)
-                        } else {
-                            colorScheme.onSurface
-                        }
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        modifier = Modifier.fillMaxWidth(),
-                        text = if (isMonitorRunning) "已处理 $processedCount 张图片" else "点击此处开启服务",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = if (isMonitorRunning) {
-                            Color(0xFF1A3825).copy(alpha = 0.7f)
-                        } else {
-                            colorScheme.onSurfaceVariantSummary
-                        }
-                    )
+            BoxWithConstraints(Modifier.fillMaxSize()) {
+                Icon(
+                    modifier = Modifier.size(170.dp).offset(x = maxWidth * .18f, y = 36.dp),
+                    imageVector = if (isMonitorRunning) Icons.Rounded.AutoAwesome else MiuixIcons.Demibold.Close2,
+                    tint = if (isMonitorRunning) Color(0xFF36D167).copy(alpha = .5f) else Color(0xFFFF4444).copy(alpha = .15f),
+                    contentDescription = null,
+                )
+                Column(Modifier.fillMaxSize().padding(16.dp).zIndex(1f), verticalArrangement = Arrangement.Center) {
+                    Text(if (isMonitorRunning) "实时处理已启动" else "实时处理未启动", fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
+                        color = if (isMonitorRunning) activeText else colorScheme.onSurface)
+                    Text(if (isMonitorRunning) "已处理 $processedCount 张图片" else "点击此处开启服务", fontSize = 14.sp,
+                        color = if (isMonitorRunning) activeText.copy(alpha = .7f) else colorScheme.onSurfaceVariantSummary)
                 }
             }
         }
-
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxHeight(),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                insideMargin = PaddingValues(16.dp),
-                onClick = onCameraClick,
-                showIndication = true
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxSize(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+        // The card itself is deliberately not clickable: entry and switch are disjoint hit regions.
+        Card(modifier = Modifier.fillMaxWidth().height(104.dp), insideMargin = PaddingValues(0.dp)) {
+            Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
+                Column(
+                    Modifier.weight(1f).fillMaxHeight().clickable(enabled = !tetherBusy, onClick = onTetherClick)
+                        .padding(start = 16.dp, top = 12.dp, bottom = 12.dp, end = 8.dp),
+                    verticalArrangement = Arrangement.Center,
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "联机模式",
-                            fontWeight = FontWeight.Medium,
-                            fontSize = 16.sp,
-                            color = colorScheme.onSurface
-                        )
-                        Text(
-                            text = if (isCameraMode) "已开启" else "已关闭",
-                            fontSize = 13.sp,
-                            color = colorScheme.onSurfaceVariantSummary.copy(alpha = 0.7f)
-                        )
-                    }
-                    Switch(
-                        checked = isCameraMode,
-                        onCheckedChange = onCameraModeChange
-                    )
+                    Text("联机模式", fontWeight = FontWeight.SemiBold, fontSize = 18.sp, color = colorScheme.onSurface)
+                    Text(tetherSummary, fontSize = 13.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        color = colorScheme.onSurfaceVariantSummary)
+                    Text(if (tetherBusy) "正在处理，请稍候…" else if (tetherEnabled) "连接后点击进入相机图库" else "插线并选择 PC(Tether)",
+                        fontSize = 11.sp, color = colorScheme.onSurfaceVariantSummary.copy(alpha = .7f))
+                }
+                Box(Modifier.width(56.dp).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                    if (tetherBusy) CircularProgressIndicator(size = 26.dp)
+                    else Switch(checked = tetherEnabled, onCheckedChange = onTetherEnabledChange, enabled = !tetherBusy)
                 }
             }
-
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                insideMargin = PaddingValues(16.dp),
-                onClick = launchPicker,
-                showIndication = true
-            ) {
-                Column(
-                    modifier = Modifier.fillMaxSize(),
-                    horizontalAlignment = Alignment.Start,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Text(
-                        modifier = Modifier.fillMaxWidth(),
-                        text = "从相册选择",
-                        fontWeight = FontWeight.Medium,
-                        fontSize = 16.sp,
-                        color = colorScheme.onSurface
-                    )
-                    Text(
-                        modifier = Modifier.fillMaxWidth(),
-                        text = "选择图片进行处理",
-                        fontSize = 13.sp,
-                        color = colorScheme.onSurfaceVariantSummary.copy(alpha = 0.7f)
-                    )
-                }
+        }
+        Card(modifier = Modifier.fillMaxWidth().height(88.dp), insideMargin = PaddingValues(16.dp), onClick = launchPicker, showIndication = true) {
+            Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center) {
+                Text("从相册选择", fontWeight = FontWeight.Medium, fontSize = 18.sp, color = colorScheme.onSurface)
+                Text("选择图片进行处理", fontSize = 13.sp, color = colorScheme.onSurfaceVariantSummary.copy(alpha = .7f))
             }
         }
     }

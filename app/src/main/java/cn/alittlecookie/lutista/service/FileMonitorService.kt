@@ -17,6 +17,7 @@ import cn.alittlecookie.lutista.R
 import cn.alittlecookie.lutista.data.database.entity.TaskSource
 import cn.alittlecookie.lutista.manager.LogManager
 import cn.alittlecookie.lutista.manager.SettingsManager
+import cn.alittlecookie.lutista.tether.transfer.TetherProcessingSuppression
 import cn.alittlecookie.lutista.util.MediaStoreScanner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -136,6 +137,10 @@ class FileMonitorService : LifecycleService(), KoinComponent {
 
             try {
                 val file = File(filePath)
+                if (TetherProcessingSuppression.shared.shouldSuppress(filePath, file.name, file.length())) {
+                    scannedFiles.add(filePath)
+                    continue
+                }
                 if (!file.exists() || !file.canRead()) {
                     logger.w(TAG, "文件不可访问，跳过: $filePath")
                     skippedFiles.add(filePath)
@@ -167,6 +172,11 @@ class FileMonitorService : LifecycleService(), KoinComponent {
                 val images = mediaStoreScanner.queryNewImages(folderPath, lastMediaStoreTimestamp)
 
                 for (image in images) {
+                    if (TetherProcessingSuppression.shared.shouldSuppress(
+                            image.uri.toString(), image.displayName, image.size)) {
+                        if (image.dateAdded > lastMediaStoreTimestamp) lastMediaStoreTimestamp = image.dateAdded
+                        continue
+                    }
                     val localPath = copyMediaStoreToCache(image.uri, image.displayName)
                     if (localPath != null) {
                         results.add(localPath)
@@ -237,7 +247,8 @@ class FileMonitorService : LifecycleService(), KoinComponent {
         if (!dir.exists() || !dir.isDirectory) return results
 
         val imageFiles = dir.listFiles { file ->
-            file.isFile && isImageFile(file.name) && file.absolutePath !in scannedFiles
+            file.isFile && isImageFile(file.name) && file.absolutePath !in scannedFiles &&
+                !TetherProcessingSuppression.shared.shouldSuppress(file.absolutePath, file.name, file.length())
         }?.filter { it.absolutePath !in skippedFiles && it.canRead() } ?: return results
 
         if (imageFiles.isEmpty()) return results
@@ -286,6 +297,10 @@ class FileMonitorService : LifecycleService(), KoinComponent {
                 val name = child.name ?: continue
                 if (!isImageFile(name)) continue
                 val uriString = child.uri.toString()
+                if (TetherProcessingSuppression.shared.shouldSuppress(uriString, name, child.length())) {
+                    scannedFiles.add(uriString)
+                    continue
+                }
                 if (uriString in scannedFiles || uriString in skippedFiles) continue
                 candidates.add(SafCandidate(child, uriString, name))
             }
@@ -300,8 +315,12 @@ class FileMonitorService : LifecycleService(), KoinComponent {
             var stableCount = 0
             for (i in candidates.indices) {
                 val (doc, uriStr, name) = candidates[i]
-                if (sizesBefore[i] != sizesAfter[i]) {
+                if (sizesBefore[i] != sizesAfter[i] || sizesAfter[i] <= 0L) {
                     logger.i(TAG, "文件尚未写入完成，下次重试: $name (${sizesBefore[i]} → ${sizesAfter[i]})")
+                    continue
+                }
+                if (TetherProcessingSuppression.shared.shouldSuppress(uriStr, name, sizesAfter[i])) {
+                    scannedFiles.add(uriStr)
                     continue
                 }
                 stableCount++

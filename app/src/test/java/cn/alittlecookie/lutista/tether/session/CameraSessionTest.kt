@@ -295,6 +295,84 @@ class CameraSessionTest {
         assertEquals(1, h.factory.createCount.get())
     }
 
+    @Test fun `201E recovery rejects non-OK CloseSession before a second OpenSession`() = scenario {
+        for (closeCode in listOf(0x2003, 0x2019)) {
+            val link = link()
+            link.openCodes.addAll(listOf(0x201E, 0x2001))
+            link.onTransaction = { call -> if (call.op.code == 0x1003) PtpResponse(closeCode) else null }
+            val h = harness(link)
+            val result = h.session.connect(target()) as ConnectOutcome.Failed
+            assertEquals("CloseSession rc=0x"+closeCode.toString(16), result.cause.message)
+            assertEquals(listOf(0x1002, 0x1003), opcodes(link).take(2))
+            assertEquals(1, opcodes(link).count { it == 0x1002 })
+            assertFalse(opcodes(link).contains(0x1001))
+            assertEquals(TetherPhase.Fatal, h.session.state.value.phase)
+            assertEquals(1, h.factory.createCount.get())
+            assertEquals(1, link.closeCount.get())
+            assertFalse(link.isOpen)
+            assertFalse(UsbIoThread.isBound())
+            assertAllIo(h, link)
+        }
+    }
+
+    @Test fun `201E recovery CloseSession exception prevents a second OpenSession`() = scenario {
+        val link = link()
+        link.openCodes.addAll(listOf(0x201E, 0x2001))
+        val original = PtpException("recovery CloseSession failed")
+        link.onTransaction = { call -> if (call.op.code == 0x1003) throw original; null }
+        val h = harness(link)
+        val result = h.session.connect(target()) as ConnectOutcome.Failed
+        assertAwaitedFailure(original, result.cause)
+        assertEquals(listOf(0x1002, 0x1003), opcodes(link).take(2))
+        assertEquals(1, opcodes(link).count { it == 0x1002 })
+        assertFalse(opcodes(link).contains(0x1001))
+        assertEquals(TetherPhase.Fatal, h.session.state.value.phase)
+        assertEquals(1, h.factory.createCount.get())
+        assertEquals(1, link.closeCount.get())
+        assertFalse(link.isOpen)
+        assertFalse(UsbIoThread.isBound())
+        assertAllIo(h, link)
+    }
+
+    @Test fun `201E recovery CloseSession fatal timeout prevents all further protocol traffic`() = scenario {
+        val link = link()
+        link.openCodes.addAll(listOf(0x201E, 0x2001))
+        val original = PtpTimeoutException("recovery CloseSession timeout")
+        link.onTransaction = { call ->
+            if (call.op.code == 0x1003) { link.isFatal = true; throw original }
+            null
+        }
+        val h = harness(link)
+        val result = h.session.connect(target()) as ConnectOutcome.Failed
+        assertAwaitedFailure(original, result.cause)
+        assertEquals(listOf(0x1002, 0x1003), opcodes(link))
+        assertEquals(TetherPhase.Fatal, h.session.state.value.phase)
+        assertEquals(1, h.factory.createCount.get())
+        assertEquals(1, link.closeCount.get())
+        assertFalse(link.isOpen)
+        assertFalse(UsbIoThread.isBound())
+        assertAllIo(h, link)
+    }
+
+    @Test fun `201E recovery does not reset the fixed connect budget`() = scenario {
+        val link = link()
+        link.openCodes.addAll(listOf(0x201E, 0x2001))
+        val h = harness(link)
+        h.factory.onCreate = { h.clock.addAndGet(3_000); link }
+        link.onTransaction = { call -> h.clock.addAndGet(call.timeoutMs.toLong()); null }
+        val result = h.session.connect(target()) as ConnectOutcome.Failed
+        assertTrue(result.cause.message!!.contains("5 second budget"))
+        assertEquals(listOf(0x1002, 0x1003), opcodes(link).take(2))
+        assertEquals(listOf(1_000, 1_000), link.calls.take(2).map { it.timeoutMs })
+        assertEquals(1, opcodes(link).count { it == 0x1002 })
+        assertFalse(opcodes(link).contains(0x1001))
+        assertEquals(1, h.factory.createCount.get())
+        assertEquals(1, link.closeCount.get())
+        assertFalse(link.isOpen)
+        assertFalse(UsbIoThread.isBound())
+        assertAllIo(h, link)
+    }
+
     @Test fun `a second 201E fails instead of retrying again`() = scenario {
         val link = link()
         link.openCodes.addAll(listOf(0x201E, 0x201E))

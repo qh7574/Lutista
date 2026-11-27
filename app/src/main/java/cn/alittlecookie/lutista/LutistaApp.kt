@@ -34,6 +34,12 @@ class LutistaApp : Application() {
         }
 
         instance = this
+        val tetherSuppression = cn.alittlecookie.lutista.tether.transfer.TetherProcessingSuppression.shared
+        tetherSuppression.configure(java.io.File(filesDir, "tether-monitor-exclusions.properties"))
+        if (!tetherSuppression.isAvailable()) {
+            Timber.e("Tether monitor exclusions unavailable; file monitoring and tether writes fail closed: %s",
+                tetherSuppression.availabilityError())
+        }
 
         get<LogManager>(LogManager::class.java).observeLogEnabled()
 

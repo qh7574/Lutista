@@ -2,6 +2,10 @@ package cn.alittlecookie.lutista.tether.driver
 
 import android.hardware.usb.UsbDevice
 import cn.alittlecookie.lutista.tether.profile.CameraCapabilities
+import cn.alittlecookie.lutista.tether.objects.CameraObjectSource
+import cn.alittlecookie.lutista.tether.config.CameraConfig
+import cn.alittlecookie.lutista.tether.liveview.LiveViewSource
+import cn.alittlecookie.lutista.tether.session.CaptureController
 import kotlinx.coroutines.flow.StateFlow
 
 sealed interface CameraTarget { val cacheKey: String }
@@ -22,19 +26,14 @@ interface CameraStatusSource {
     val battery: StateFlow<Int?>
     val modePos: StateFlow<Long?>
 }
-/** Future controllers are deliberately absent until their own delivery gates pass. */
-interface CameraObjectSource
-interface CameraLiveView
-interface CameraConfig
-interface CameraCapture
 interface CameraDriver {
     val profileId: String
     val capabilities: StateFlow<CameraCapabilities>
     val status: CameraStatusSource
     val objects: CameraObjectSource? get() = null
-    val liveView: CameraLiveView? get() = null
+    val liveView: LiveViewSource? get() = null
     val config: CameraConfig? get() = null
-    val capture: CameraCapture? get() = null
+    val capture: CaptureController? get() = null
     suspend fun connect(): ConnectOutcome
     suspend fun disconnect(reason: CloseReason)
     suspend fun ensureCapabilities(force: Boolean = false)

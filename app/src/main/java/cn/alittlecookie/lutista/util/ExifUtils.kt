@@ -291,6 +291,7 @@ object ExifUtils {
 
     // ── Tag registry ─────────────────────────────────────────────
 
+    @Suppress("RestrictedApi")
     private val ALL_TAGS = listOf(
         ExifInterface.TAG_APERTURE_VALUE, ExifInterface.TAG_ARTIST, ExifInterface.TAG_BITS_PER_SAMPLE,
         ExifInterface.TAG_BRIGHTNESS_VALUE, ExifInterface.TAG_CFA_PATTERN, ExifInterface.TAG_COLOR_SPACE,

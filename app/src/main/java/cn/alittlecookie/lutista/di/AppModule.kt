@@ -26,6 +26,13 @@ import cn.alittlecookie.lutista.tether.debug.TetherDiagLogger
 import cn.alittlecookie.lutista.tether.driver.CameraDriverFactory
 import cn.alittlecookie.lutista.tether.driver.PtpUsbDriverFactory
 import cn.alittlecookie.lutista.tether.profile.CameraProfileRegistry
+import cn.alittlecookie.lutista.tether.repository.TetherRepository
+import cn.alittlecookie.lutista.tether.transfer.*
+import cn.alittlecookie.lutista.data.database.dao.CameraObjectDao
+import cn.alittlecookie.lutista.data.database.dao.TetherTransferDao
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import cn.alittlecookie.lutista.tether.session.TetherRuntime
 import cn.alittlecookie.lutista.tether.session.UsbHub
 import cn.alittlecookie.lutista.tether.store.CapabilityCache
@@ -53,13 +60,15 @@ val appModule = module {
             androidContext(),
             AppDatabase::class.java,
             "Lutista.db"
-        ).addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4).build()
+        ).addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4, AppDatabase.MIGRATION_4_5).build()
     }
 
     // DAOs
     single<FilterDao> { get<AppDatabase>().filterDao() }
     single<TaskDao> { get<AppDatabase>().taskDao() }
     single<WatermarkDao> { get<AppDatabase>().watermarkDao() }
+    single<CameraObjectDao> { get<AppDatabase>().cameraObjectDao() }
+    single<TetherTransferDao> { get<AppDatabase>().tetherTransferDao() }
 
     // Repositories
     singleOf(::FilterRepository)
@@ -91,7 +100,7 @@ val appModule = module {
 
     // Services
     single { ImageProcessingService(androidContext(), get(), get(), get(), get(), get(), get()) }
-    singleOf(::TaskSubmissionManager)
+    single { TaskSubmissionManager(get(), get(), get(), get()) }
 
     // Watermark System
     single { BitmapCache() }
@@ -124,4 +133,10 @@ val appModule = module {
         val hub = get<UsbHub>()
         TetherRuntime(hub, get<CameraDriverFactory> { parametersOf(hub) }, get(), get())
     }
+    // One formal owner across Activity rotation and the connected-device foreground service.
+    single<TransferStore> { RoomTransferStore(get()) }
+    single<TransferTargetStorage> { AndroidTransferTargetStorage(androidContext(), get()) }
+    single<TetherTaskSubmitter> { TaskSubmissionTetherSubmitter(get(), get(), get(), get()) }
+    single { TransferEngine(CoroutineScope(SupervisorJob() + Dispatchers.IO), get(), get(), get()) }
+    single { TetherRepository(androidContext(), get(), get(), get(), get(), get(), get()) }
 }

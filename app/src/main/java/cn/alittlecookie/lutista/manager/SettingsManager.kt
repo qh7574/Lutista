@@ -9,6 +9,9 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.runBlocking
@@ -341,6 +344,41 @@ class SettingsManager(
             java.text.SimpleDateFormat("yyyy", java.util.Locale.US).format(java.util.Date()))
     }
 
+    // USB authority is process-local. A persisted preference must NEVER reconnect/open USB.
+    private val tetherEnabledState = MutableStateFlow(false)
+    val tetherEnabled: StateFlow<Boolean> = tetherEnabledState.asStateFlow()
+    fun setTetherEnabled(value: Boolean) { tetherEnabledState.value = value }
+    fun getTetherEnabledSync(): Boolean = tetherEnabledState.value
+
+    val tetherAutoTransfer: Flow<Boolean> = dataStore.data.map { it[TETHER_AUTO_TRANSFER_KEY] ?: true }
+    suspend fun setTetherAutoTransfer(value: Boolean) { dataStore.edit { it[TETHER_AUTO_TRANSFER_KEY] = value } }
+    fun getTetherAutoTransferSync(): Boolean = runBlocking { tetherAutoTransfer.first() }
+
+    val tetherLiveViewFormatIndex: Flow<Int> = dataStore.data.map { (it[TETHER_LIVE_VIEW_FORMAT_INDEX_KEY] ?: 0).coerceAtLeast(0) }
+    suspend fun setTetherLiveViewFormatIndex(value: Int) { dataStore.edit { it[TETHER_LIVE_VIEW_FORMAT_INDEX_KEY] = value.coerceAtLeast(0) } }
+    fun getTetherLiveViewFormatIndexSync(): Int = runBlocking { tetherLiveViewFormatIndex.first() }
+
+    val tetherLastCameraModel: Flow<String> = dataStore.data.map { it[TETHER_LAST_CAMERA_MODEL_KEY] ?: "" }
+    suspend fun setTetherLastCameraModel(value: String) { dataStore.edit { it[TETHER_LAST_CAMERA_MODEL_KEY] = value } }
+    fun getTetherLastCameraModelSync(): String = runBlocking { tetherLastCameraModel.first() }
+
+    val tetherForcePhotoStyleRestore: Flow<Boolean> = dataStore.data.map { it[TETHER_FORCE_PHOTO_STYLE_RESTORE_KEY] ?: true }
+    suspend fun setTetherForcePhotoStyleRestore(value: Boolean) { dataStore.edit { it[TETHER_FORCE_PHOTO_STYLE_RESTORE_KEY] = value } }
+    fun getTetherForcePhotoStyleRestoreSync(): Boolean = runBlocking { tetherForcePhotoStyleRestore.first() }
+
+    val tetherLiveViewFilterEnabled: Flow<Boolean> = dataStore.data.map { it[TETHER_LIVE_VIEW_FILTER_ENABLED_KEY] ?: false }
+    suspend fun setTetherLiveViewFilterEnabled(value: Boolean) { dataStore.edit { it[TETHER_LIVE_VIEW_FILTER_ENABLED_KEY] = value } }
+    fun getTetherLiveViewFilterEnabledSync(): Boolean = runBlocking { tetherLiveViewFilterEnabled.first() }
+
+    val tetherLiveViewFilterFps: Flow<Int> = dataStore.data.map {
+        (it[TETHER_LIVE_VIEW_FILTER_FPS_KEY] ?: 15).takeIf { fps -> fps in setOf(10, 15, 30) } ?: 15
+    }
+    suspend fun setTetherLiveViewFilterFps(value: Int) {
+        require(value in setOf(10, 15, 30)) { "Live view filter FPS must be 10, 15 or 30" }
+        dataStore.edit { it[TETHER_LIVE_VIEW_FILTER_FPS_KEY] = value }
+    }
+    fun getTetherLiveViewFilterFpsSync(): Int = runBlocking { tetherLiveViewFilterFps.first() }
+
     // T02 tether capability cache and opt-in diagnostic settings.
     val tetherCapsCache: Flow<String> = dataStore.data.map { prefs -> prefs[TETHER_CAPS_CACHE_KEY] ?: "" }
     suspend fun setTetherCapsCache(value: String) { dataStore.edit { it[TETHER_CAPS_CACHE_KEY] = value } }
@@ -367,6 +405,12 @@ class SettingsManager(
     suspend fun setTetherDebugFaultClaimFail(value: Boolean) { dataStore.edit { it[TETHER_DEBUG_FAULT_CLAIM_FAIL_KEY] = value } }
 
     companion object {
+        private val TETHER_AUTO_TRANSFER_KEY = booleanPreferencesKey("tether_auto_transfer")
+        private val TETHER_LIVE_VIEW_FORMAT_INDEX_KEY = intPreferencesKey("tether_live_view_format_index")
+        private val TETHER_LAST_CAMERA_MODEL_KEY = stringPreferencesKey("tether_last_camera_model")
+        private val TETHER_FORCE_PHOTO_STYLE_RESTORE_KEY = booleanPreferencesKey("tether_force_photo_style_restore")
+        private val TETHER_LIVE_VIEW_FILTER_ENABLED_KEY = booleanPreferencesKey("tether_live_view_filter_enabled")
+        private val TETHER_LIVE_VIEW_FILTER_FPS_KEY = intPreferencesKey("tether_live_view_filter_fps")
         private val TETHER_CAPS_CACHE_KEY = stringPreferencesKey("tether_caps_cache")
         private val TETHER_PROBE_SCHEMA_KEY = intPreferencesKey("tether_probe_schema")
         private val TETHER_DEBUG_ENABLED_KEY = booleanPreferencesKey("tether_debug_enabled")
