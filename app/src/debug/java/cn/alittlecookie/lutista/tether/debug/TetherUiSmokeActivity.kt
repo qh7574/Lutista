@@ -23,6 +23,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -32,6 +33,9 @@ import cn.alittlecookie.lutista.tether.ui.*
 import cn.alittlecookie.lutista.ui.theme.LutistaTheme
 import java.lang.ref.WeakReference
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import org.koin.compose.koinInject
+import cn.alittlecookie.lutista.manager.SettingsManager
 import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.Text
 
@@ -54,7 +58,16 @@ class TetherUiSmokeActivity : ComponentActivity() {
 private fun SmokeContent(initialPage: TetherPage, formatCase: String?, finish: () -> Unit) {
     val image = remember { SmokeBitmapSource() }
     DisposableEffect(image) { onDispose { image.close() } }
+    // 与真实仓库一致：排序/筛选读自 DataStore，改动也写回，用来验证跨会话记忆。
+    val settings: SettingsManager = koinInject()
+    val scope = rememberCoroutineScope()
     var state by remember { mutableStateOf(smokeState(initialPage, image).withFormatCase(formatCase)) }
+    LaunchedEffect(Unit) {
+        val sortName = settings.getTetherGallerySortSync()
+        val sort = TetherGallerySort.entries.firstOrNull { it.name == sortName } ?: TetherGallerySort.CapturedDesc
+        val types = tetherGalleryTypesOf(settings.getTetherGalleryTypeMaskSync())
+        state = state.copy(gallery = state.gallery.copy(sort = sort, types = types))
+    }
     LaunchedEffect(Unit) {
         delay(900)
         state = state.copy(gallery = state.gallery.copy(enumerating = false, enumeratedCount = 24,
@@ -74,7 +87,16 @@ private fun SmokeContent(initialPage: TetherPage, formatCase: String?, finish: (
             }
             Button(onClick = { state = state.copy(liveView = state.liveView.copy(isVideoMode = !state.liveView.isVideoMode)) }) { Text("照片/录像", fontSize = 11.sp) }
         }
-        TetherScreen(state, onAction = { state = reduceSmoke(state, it) }, onBack = finish)
+        TetherScreen(state, onAction = { action ->
+            state = reduceSmoke(state, action)
+            when (action) {
+                is TetherUiAction.SetGallerySort -> scope.launch { settings.setTetherGallerySort(action.sort.name) }
+                is TetherUiAction.ToggleGalleryType -> scope.launch {
+                    settings.setTetherGalleryTypeMask(tetherGalleryTypeMask(state.gallery.types))
+                }
+                else -> Unit
+            }
+        }, onBack = finish)
     }
 }
 
@@ -148,7 +170,14 @@ private fun reduceSmoke(state: TetherUiState, action: TetherUiAction): TetherUiS
         is TetherUiAction.SelectDirectory -> state.copy(gallery = state.gallery.copy(selectedDirectoryHandle = action.directoryHandle))
         is TetherUiAction.SetSelectionMode -> state.copy(gallery = state.gallery.copy(selectionMode = action.enabled, selectedHandles = emptySet()))
         is TetherUiAction.ToggleSelection -> state.copy(gallery = state.gallery.copy(selectedHandles = if (action.handle in state.gallery.selectedHandles) state.gallery.selectedHandles - action.handle else state.gallery.selectedHandles + action.handle))
-        TetherUiAction.SelectAll -> state.copy(gallery = state.gallery.copy(selectedHandles = state.gallery.items.filter { (state.gallery.selectedStorageId == null || it.storageId == state.gallery.selectedStorageId) && (state.gallery.selectedDirectoryHandle == null || it.directoryHandle == state.gallery.selectedDirectoryHandle) }.map { it.handle }.toSet()))
+        is TetherUiAction.SelectAll -> state.copy(gallery = state.gallery.copy(selectedHandles = action.handles))
+        is TetherUiAction.SetGallerySort -> state.copy(gallery = state.gallery.copy(sort = action.sort))
+        is TetherUiAction.ToggleGalleryType -> {
+            val before = state.gallery.types
+            val after = if (action.kind in before) before - action.kind else before + action.kind
+            // 与仓库同一规则：至少保留一类。
+            if (after.isEmpty()) state else state.copy(gallery = state.gallery.copy(types = after))
+        }
         TetherUiAction.DismissClockWarning -> state.copy(gallery = state.gallery.copy(clockWarning = null))
         is TetherUiAction.Download -> state.copy(gallery = state.gallery.copy(items = state.gallery.items.map { if (it.handle in action.handles) it.copy(originalStatus = TetherOriginalStatus.Downloaded) else it }), dialog = TetherDialogUi("模拟下载完成", "只修改 UI 状态，未读取相机或创建文件。"))
         is TetherUiAction.SetParameter -> {

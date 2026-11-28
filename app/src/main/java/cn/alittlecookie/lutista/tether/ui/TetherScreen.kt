@@ -90,19 +90,18 @@ private fun TetherScreenContent(state: TetherUiState, onAction: (TetherUiAction)
         }
     }
     Column(Modifier.fillMaxSize().background(MiuixTheme.colorScheme.background).safeDrawingPadding()) {
-        if (state.page != TetherPage.LiveView) {
+        if (state.page == TetherPage.Preview) {
             Row(Modifier.fillMaxWidth().lutistaBlurEffect(backdrop).background(barColor).padding(horizontal = 12.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TetherButton("返回", requestBack)
-                Text(if (state.page == TetherPage.Preview) "文件预览" else "联机模式", Modifier.weight(1f), fontSize = 19.sp,
+                Text("文件预览", Modifier.weight(1f), fontSize = 19.sp,
                     fontWeight = FontWeight.SemiBold, color = MiuixTheme.colorScheme.onSurface)
                 TetherButton("相机", { showCameraInfo = true })
-                if (state.capabilities.canLiveView) TetherButton("实时预览", { onAction(TetherUiAction.OpenLiveView) }, enabled = state.connected && !state.busy)
             }
         }
         Box(Modifier.weight(1f).fillMaxWidth().then(backdrop?.let { Modifier.layerBackdrop(it) } ?: Modifier)) {
             when (state.page) {
-                TetherPage.Gallery -> TetherGallery(state, onAction)
+                TetherPage.Gallery -> TetherGallery(state, onAction, onBack = requestBack)
                 TetherPage.Preview -> TetherPreview(state, onAction)
                 TetherPage.LiveView -> TetherLiveView(state, onAction, requestExit)
             }

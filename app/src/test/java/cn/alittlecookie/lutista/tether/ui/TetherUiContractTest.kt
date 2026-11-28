@@ -14,42 +14,18 @@ class TetherUiContractTest {
     }
 
     @Test
-    fun `landscape reserves the approved control widths independently of collapse`() {
-        val expanded = TetherLayoutSpec.fromSize(900f, 400f)
-        val collapsed = TetherLayoutSpec.fromSize(900f, 400f, sidebarCollapsed = true)
-        assertEquals(208, expanded.leftPanelWidthDp)
-        assertEquals(48, collapsed.leftPanelWidthDp)
-        assertEquals(92, expanded.rightToolbarWidthDp)
-        assertEquals(92, collapsed.rightToolbarWidthDp)
-        assertEquals(1.4817f, expanded.previewAspectRatio, 0.00001f)
+    fun `landscape reserves the approved rail widths`() {
+        val spec = TetherLayoutSpec.fromSize(900f, 400f)
+        assertEquals(TetherLayoutSpec.LEFT_RAIL_WIDTH_DP, spec.leftRailWidthDp)
+        assertEquals(TetherLayoutSpec.RIGHT_RAIL_WIDTH_DP, spec.rightRailWidthDp)
+        assertEquals(1.4817f, spec.previewAspectRatio, 0.00001f)
+        assertEquals(104, spec.leftRailWidthDp)
+        assertEquals(84, spec.rightRailWidthDp)
     }
 
     @Test
-    fun `portrait peek respects the 45 percent preview cap on tall windows`() {
-        val layout = TetherLayoutSpec.portrait(628f, 800f, 0)
-        assertEquals(360f, layout.previewHeightDp, 0.001f)
-        assertEquals(56f, layout.panelHeightDp, 0.001f)
-        assertEquals(48f, layout.modeHeightDp, 0.001f)
-    }
-
-    @Test
-    fun `expanded portrait panel overlays preview within its reserved region`() {
-        val layout = TetherLayoutSpec.portrait(308f, 480f, 2)
-        assertEquals(240f, layout.previewHeightDp, 0.001f)
-        assertEquals(260f, layout.panelHeightDp, 0.001f)
-        assertEquals(308f, layout.panelHeightDp + layout.modeHeightDp, 0.001f)
-    }
-
-    @Test
-    fun `very short viewports never produce a negative or overflowing panel`() {
-        listOf(0f, 20f, 48f, 90f, 180f).forEach { available ->
-            (0..2).forEach { stage ->
-                val layout = TetherLayoutSpec.portrait(available, available + 172f, stage)
-                assertTrue(layout.panelHeightDp >= 0f)
-                assertTrue(layout.previewHeightDp in 0f..available)
-                assertTrue(layout.panelHeightDp + layout.modeHeightDp <= available)
-            }
-        }
+    fun `portrait panel keeps its three approved stages`() {
+        assertEquals(listOf(96f, 268f, 372f), TetherPortraitPanelHeights)
     }
 
     @Test
@@ -106,5 +82,65 @@ class TetherUiContractTest {
         assertEquals("拍摄处理中，暂时无法切换预览分辨率", ready.copy(liveView = ready.liveView.copy(captureBusy = true)).liveViewFormatUnavailableReason())
         assertEquals(null, ready.liveViewFormatUnavailableReason())
     }
+
+    @Test
+    fun `gallery type mask survives a persistence round trip`() {
+        assertEquals(DefaultTetherGalleryTypes, tetherGalleryTypesOf(tetherGalleryTypeMask(DefaultTetherGalleryTypes)))
+        assertEquals(setOf(TetherMediaKind.Jpeg), tetherGalleryTypesOf(tetherGalleryTypeMask(setOf(TetherMediaKind.Jpeg))))
+        assertEquals(
+            setOf(TetherMediaKind.Raw, TetherMediaKind.Video),
+            tetherGalleryTypesOf(tetherGalleryTypeMask(setOf(TetherMediaKind.Raw, TetherMediaKind.Video))),
+        )
+        // 0 表示"从未保存过"，回落到全部类型而不是空集合。
+        assertEquals(DefaultTetherGalleryTypes, tetherGalleryTypesOf(0))
+        // Unknown 不占位，不会因为相机给出未知类型而让筛选只剩空集。
+        assertEquals(0, TetherMediaKind.Unknown.galleryMaskBit())
+    }
+
+    @Test
+    fun `gallery sort and filter reorder and hide items`() {
+        val items = listOf(
+            media(handle = 1, kind = TetherMediaKind.Jpeg, name = "B.JPG", size = 5, capturedAt = "2024-05-02 10:00"),
+            media(handle = 2, kind = TetherMediaKind.Raw, name = "A.RW2", size = 30, capturedAt = "2024-05-01 09:00"),
+            media(handle = 3, kind = TetherMediaKind.Video, name = "C.MOV", size = 12, capturedAt = "2024-05-03 08:00"),
+            media(handle = 4, kind = TetherMediaKind.Unknown, name = "D.BIN", size = 1, capturedAt = null),
+        )
+        val all = DefaultTetherGalleryTypes
+
+        // 新→旧：没有拍摄时间的排在最后。
+        assertEquals(
+            listOf(3L, 1L, 2L, 4L),
+            visibleTetherMedia(items, TetherGallerySort.CapturedDesc, all).map { it.handle },
+        )
+        // 旧→新：没有拍摄时间的排在最前。
+        assertEquals(
+            listOf(4L, 2L, 1L, 3L),
+            visibleTetherMedia(items, TetherGallerySort.CapturedAsc, all).map { it.handle },
+        )
+        assertEquals(
+            listOf(2L, 1L, 3L, 4L),
+            visibleTetherMedia(items, TetherGallerySort.NameAsc, all).map { it.handle },
+        )
+        assertEquals(
+            listOf(2L, 3L, 1L, 4L),
+            visibleTetherMedia(items, TetherGallerySort.SizeDesc, all).map { it.handle },
+        )
+        // 未知类型始终保留；被关掉的类型隐藏。
+        assertEquals(
+            listOf(2L, 4L),
+            visibleTetherMedia(items, TetherGallerySort.SizeDesc, setOf(TetherMediaKind.Raw)).map { it.handle },
+        )
+    }
+
+    private fun media(handle: Long, kind: TetherMediaKind, name: String, size: Long, capturedAt: String?) =
+        TetherMediaUi(
+            handle = handle,
+            name = name,
+            kind = kind,
+            storageId = 1L,
+            directoryHandle = 2L,
+            sizeBytes = size,
+            capturedAt = capturedAt,
+        )
 
 }

@@ -163,6 +163,14 @@ class TetherRepository(
             updateDirectFilterAvailability()
         } }
         scope.launch { settings.tetherDirectFilter.distinctUntilChanged().collect { value -> update { it.copy(directFilter = value) } } }
+        // 图库排序/筛选是纯展示偏好：读回来只更新状态，绝不触发重新枚举。
+        scope.launch { settings.tetherGallerySort.distinctUntilChanged().collect { name ->
+            val sort = TetherGallerySort.entries.firstOrNull { it.name == name } ?: TetherGallerySort.CapturedDesc
+            updateGallery { it.copy(sort = sort) }
+        } }
+        scope.launch { settings.tetherGalleryTypeMask.distinctUntilChanged().collect { mask ->
+            updateGallery { it.copy(types = tetherGalleryTypesOf(mask)) }
+        } }
         scope.launch { settings.globalWatermarkId.distinctUntilChanged().collect { id ->
             hasDirectWatermark = id.isNotBlank() && id != "none"
             updateDirectFilterAvailability()
@@ -514,7 +522,20 @@ class TetherRepository(
                 updateGallery { it.copy(selectedDirectoryHandle = action.directoryHandle, selectedHandles = emptySet()) } }
             is TetherUiAction.SetSelectionMode -> updateGallery { it.copy(selectionMode = action.enabled, selectedHandles = emptySet()) }
             is TetherUiAction.ToggleSelection -> updateGallery { it.copy(selectionMode = true, selectedHandles = if (action.handle in it.selectedHandles) it.selectedHandles - action.handle else it.selectedHandles + action.handle) }
-            TetherUiAction.SelectAll -> updateGallery { it.copy(selectionMode = true, selectedHandles = it.items.mapTo(linkedSetOf()) { item -> item.handle }) }
+            is TetherUiAction.SelectAll -> updateGallery { it.copy(selectionMode = true, selectedHandles = action.handles.toCollection(linkedSetOf())) }
+            is TetherUiAction.SetGallerySort -> {
+                updateGallery { it.copy(sort = action.sort) }
+                launchAction { settings.setTetherGallerySort(action.sort.name) }
+            }
+            is TetherUiAction.ToggleGalleryType -> {
+                val before = mutableUi.value.gallery.types
+                val after = if (action.kind in before) before - action.kind else before + action.kind
+                // 至少保留一类，否则整页变空且没有入口解释原因。
+                if (after.isNotEmpty()) {
+                    updateGallery { it.copy(types = after) }
+                    launchAction { settings.setTetherGalleryTypeMask(tetherGalleryTypeMask(after)) }
+                }
+            }
             TetherUiAction.DismissClockWarning -> updateGallery { it.copy(clockWarning = null) }
             is TetherUiAction.Download -> launchAction { download(action.handles) }
             TetherUiAction.CancelTransfer -> launchAction { transfers.cancelForeground() }

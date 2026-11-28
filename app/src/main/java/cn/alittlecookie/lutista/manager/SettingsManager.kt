@@ -360,6 +360,16 @@ class SettingsManager(
     suspend fun setTetherDirectFilter(value: Boolean) { dataStore.edit { it[TETHER_DIRECT_FILTER_KEY] = value } }
     fun getTetherDirectFilterSync(): Boolean = runBlocking { tetherDirectFilter.first() }
 
+    /** 联机图库排序：保存枚举名，读回时按未知值回落默认（见 TetherGallerySort）。 */
+    val tetherGallerySort: Flow<String> = dataStore.data.map { it[TETHER_GALLERY_SORT_KEY].orEmpty() }
+    suspend fun setTetherGallerySort(value: String) { dataStore.edit { it[TETHER_GALLERY_SORT_KEY] = value } }
+    fun getTetherGallerySortSync(): String = runBlocking { tetherGallerySort.first() }
+
+    /** 联机图库类型筛选位掩码：0 表示未设置（回退为全部类型）。 */
+    val tetherGalleryTypeMask: Flow<Int> = dataStore.data.map { it[TETHER_GALLERY_TYPE_MASK_KEY] ?: 0 }
+    suspend fun setTetherGalleryTypeMask(value: Int) { dataStore.edit { it[TETHER_GALLERY_TYPE_MASK_KEY] = value } }
+    fun getTetherGalleryTypeMaskSync(): Int = runBlocking { tetherGalleryTypeMask.first() }
+
     val tetherLiveViewFormatIndex: Flow<Int> = dataStore.data.map { (it[TETHER_LIVE_VIEW_FORMAT_INDEX_KEY] ?: 0).coerceAtLeast(0) }
     suspend fun setTetherLiveViewFormatIndex(value: Int) { dataStore.edit { it[TETHER_LIVE_VIEW_FORMAT_INDEX_KEY] = value.coerceAtLeast(0) } }
     fun getTetherLiveViewFormatIndexSync(): Int = runBlocking { tetherLiveViewFormatIndex.first() }
@@ -413,6 +423,8 @@ class SettingsManager(
     companion object {
         private val TETHER_AUTO_TRANSFER_KEY = booleanPreferencesKey("tether_auto_transfer")
         private val TETHER_DIRECT_FILTER_KEY = booleanPreferencesKey("tether_direct_filter")
+        private val TETHER_GALLERY_SORT_KEY = stringPreferencesKey("tether_gallery_sort")
+        private val TETHER_GALLERY_TYPE_MASK_KEY = intPreferencesKey("tether_gallery_type_mask")
         private val TETHER_LIVE_VIEW_FORMAT_INDEX_KEY = intPreferencesKey("tether_live_view_format_index")
         private val TETHER_LAST_CAMERA_MODEL_KEY = stringPreferencesKey("tether_last_camera_model")
         private val TETHER_FORCE_PHOTO_STYLE_RESTORE_KEY = booleanPreferencesKey("tether_force_photo_style_restore")

@@ -31,6 +31,77 @@ enum class TetherParameterKey { Iso, Shutter, ExposureCompensation, Aperture, Wh
 enum class TetherExitDestination { Back, Gallery, GlobalFilterSettings }
 enum class TetherConnectionGuide { NoUsb, MtpDescriptor, WrongMode, UnknownDevice }
 
+/** 图库排序偏好。持久化的是枚举名，因此重命名会重置为默认值。 */
+enum class TetherGallerySort { CapturedDesc, CapturedAsc, NameAsc, NameDesc, SizeDesc }
+
+/**
+ * 类型筛选用位掩码持久化。Unknown 不参与筛选，避免相机给出未知类型时整页空白。
+ */
+fun TetherMediaKind.galleryMaskBit(): Int = when (this) {
+    TetherMediaKind.Jpeg -> 1
+    TetherMediaKind.Raw -> 2
+    TetherMediaKind.Video -> 4
+    TetherMediaKind.Unknown -> 0
+}
+
+val DefaultTetherGalleryTypes: Set<TetherMediaKind> =
+    setOf(TetherMediaKind.Jpeg, TetherMediaKind.Raw, TetherMediaKind.Video)
+
+fun tetherGalleryTypeMask(types: Set<TetherMediaKind>): Int =
+    types.fold(0) { mask, kind -> mask or kind.galleryMaskBit() }
+
+fun tetherGalleryTypesOf(mask: Int): Set<TetherMediaKind> =
+    if (mask == 0) DefaultTetherGalleryTypes
+    else setOf(TetherMediaKind.Jpeg, TetherMediaKind.Raw, TetherMediaKind.Video)
+        .filterTo(linkedSetOf()) { (mask and it.galleryMaskBit()) != 0 }
+
+/** 排序子菜单的显示文案；顺序即菜单顺序。 */
+internal fun TetherGallerySort.label(): String = when (this) {
+    TetherGallerySort.CapturedDesc -> "拍摄时间 · 新→旧"
+    TetherGallerySort.CapturedAsc -> "拍摄时间 · 旧→新"
+    TetherGallerySort.NameAsc -> "文件名 · A→Z"
+    TetherGallerySort.NameDesc -> "文件名 · Z→A"
+    TetherGallerySort.SizeDesc -> "文件大小 · 大→小"
+}
+
+internal fun TetherGallerySort.summary(): String = when (this) {
+    TetherGallerySort.CapturedDesc -> "最新优先"
+    TetherGallerySort.CapturedAsc -> "最早优先"
+    TetherGallerySort.NameAsc -> "文件名升序"
+    TetherGallerySort.NameDesc -> "文件名降序"
+    TetherGallerySort.SizeDesc -> "大文件优先"
+}
+
+internal val TetherTypeOrder = listOf(TetherMediaKind.Jpeg, TetherMediaKind.Raw, TetherMediaKind.Video)
+
+internal fun TetherMediaKind.typeLabel(): String = when (this) {
+    TetherMediaKind.Jpeg -> "JPG 照片"
+    TetherMediaKind.Raw -> "RAW 原图"
+    TetherMediaKind.Video -> "视频"
+    TetherMediaKind.Unknown -> "其他"
+}
+
+/** 可见项：先按类型过滤，再按偏好排序；未加载完的条目（无尺寸/时间）排在后面。 */
+internal fun visibleTetherMedia(
+    items: List<TetherMediaUi>,
+    sort: TetherGallerySort,
+    types: Set<TetherMediaKind>,
+): List<TetherMediaUi> {
+    // 未知类型无法归类，永远显示，避免相机给出异常格式时文件凭空消失。
+    val filtered = items.filter { it.kind == TetherMediaKind.Unknown || it.kind in types }
+    return when (sort) {
+        TetherGallerySort.CapturedDesc -> filtered.sortedWith(
+            compareByDescending<TetherMediaUi> { it.capturedAt.orEmpty() }.thenByDescending { it.handle },
+        )
+        TetherGallerySort.CapturedAsc -> filtered.sortedWith(
+            compareBy<TetherMediaUi> { it.capturedAt.orEmpty() }.thenBy { it.handle },
+        )
+        TetherGallerySort.NameAsc -> filtered.sortedBy { it.name.lowercase() }
+        TetherGallerySort.NameDesc -> filtered.sortedByDescending { it.name.lowercase() }
+        TetherGallerySort.SizeDesc -> filtered.sortedByDescending { it.sizeBytes ?: -1L }
+    }
+}
+
 /** Unknown capabilities remain attemptable; unsupported capabilities render an explanatory unavailable state. */
 data class TetherCapabilities(
     val canBrowse: Boolean = false,
@@ -82,6 +153,9 @@ data class TetherGalleryUi(
     val clockWarning: String? = null,
     val error: String? = null,
     val directoryWarning: String? = null,
+    /** 仅影响本机展示顺序与可见项，不触发重新枚举。 */
+    val sort: TetherGallerySort = TetherGallerySort.CapturedDesc,
+    val types: Set<TetherMediaKind> = DefaultTetherGalleryTypes,
 )
 
 data class TetherPreviewUi(
@@ -240,7 +314,10 @@ sealed interface TetherUiAction {
     data class SelectDirectory(val directoryHandle: Long?) : TetherUiAction
     data class SetSelectionMode(val enabled: Boolean) : TetherUiAction
     data class ToggleSelection(val handle: Long) : TetherUiAction
-    data object SelectAll : TetherUiAction
+    /** 全选当前可见（已过滤）的项目；过滤状态下不会选中看不见的文件。 */
+    data class SelectAll(val handles: Set<Long>) : TetherUiAction
+    data class SetGallerySort(val sort: TetherGallerySort) : TetherUiAction
+    data class ToggleGalleryType(val kind: TetherMediaKind) : TetherUiAction
     data object DismissClockWarning : TetherUiAction
     data class Download(val handles: Set<Long>) : TetherUiAction
     data object CancelTransfer : TetherUiAction

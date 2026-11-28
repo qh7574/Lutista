@@ -6,6 +6,11 @@ import android.content.ServiceConnection
 import android.net.Uri
 import android.os.IBinder
 import android.widget.Toast
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -56,6 +61,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import org.koin.compose.koinInject
+import top.yukonga.miuix.kmp.icon.extended.Album
+import top.yukonga.miuix.kmp.icon.extended.ChevronForward
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
@@ -354,54 +361,115 @@ private fun StatusSection(
 ) {
     val dark = colorScheme.background.luminance() < .5f
     val activeText = if (dark) colorScheme.onPrimaryContainer else Color(0xFF1A3825)
+    val activeSub = if (dark) colorScheme.onPrimaryContainer.copy(alpha = .72f) else Color(0xFF1A3825).copy(alpha = .66f)
+    val activeIconBackground = if (dark) colorScheme.onPrimaryContainer.copy(alpha = .14f) else Color(0xFF1F9D45).copy(alpha = .16f)
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Card(
-            modifier = Modifier.fillMaxWidth().height(120.dp),
-            colors = CardDefaults.defaultColors(color = if (isMonitorRunning) {
-                if (dark) colorScheme.primaryContainer else Color(0xFFDFFAE4)
-            } else colorScheme.surfaceVariant),
-            onClick = onMonitorToggle,
-            showIndication = true,
-        ) {
-            BoxWithConstraints(Modifier.fillMaxSize()) {
-                Icon(
-                    modifier = Modifier.size(170.dp).offset(x = maxWidth * .18f, y = 36.dp),
-                    imageVector = if (isMonitorRunning) Icons.Rounded.AutoAwesome else MiuixIcons.Demibold.Close2,
-                    tint = if (isMonitorRunning) Color(0xFF36D167).copy(alpha = .5f) else Color(0xFFFF4444).copy(alpha = .15f),
-                    contentDescription = null,
-                )
-                Column(Modifier.fillMaxSize().padding(16.dp).zIndex(1f), verticalArrangement = Arrangement.Center) {
-                    Text(if (isMonitorRunning) "实时处理已启动" else "实时处理未启动", fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
-                        color = if (isMonitorRunning) activeText else colorScheme.onSurface)
-                    Text(if (isMonitorRunning) "已处理 $processedCount 张图片" else "点击此处开启服务", fontSize = 14.sp,
-                        color = if (isMonitorRunning) activeText.copy(alpha = .7f) else colorScheme.onSurfaceVariantSummary)
+        // 半格 1：实时处理（右上角开关与联机卡对齐）
+        Row(Modifier.fillMaxWidth().height(118.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Card(
+                modifier = Modifier.weight(1f).fillMaxHeight(),
+                colors = CardDefaults.defaultColors(color = if (isMonitorRunning) {
+                    if (dark) colorScheme.primaryContainer else Color(0xFFDFFAE4)
+                } else colorScheme.surfaceVariant),
+                onClick = onMonitorToggle,
+                showIndication = true,
+            ) {
+                BoxWithConstraints(Modifier.fillMaxSize()) {
+                    Icon(
+                        modifier = Modifier.size(96.dp).offset(x = maxWidth * .58f, y = 46.dp),
+                        imageVector = if (isMonitorRunning) Icons.Rounded.AutoAwesome else MiuixIcons.Demibold.Close2,
+                        tint = if (isMonitorRunning) Color(0xFF36D167).copy(alpha = .2f) else Color(0xFFFF4444).copy(alpha = .1f),
+                        contentDescription = null,
+                    )
+                    Column(Modifier.fillMaxSize().padding(13.dp), verticalArrangement = Arrangement.SpaceBetween) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier.size(30.dp).clip(RoundedCornerShape(10.dp))
+                                    .background(if (isMonitorRunning) activeIconBackground else colorScheme.surface.copy(alpha = .45f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    modifier = Modifier.size(17.dp),
+                                    imageVector = if (isMonitorRunning) Icons.Rounded.AutoAwesome else MiuixIcons.Demibold.Close2,
+                                    tint = if (isMonitorRunning) Color(0xFF1F9D45).let { if (dark) Color(0xFF36D167) else it } else colorScheme.onSurfaceVariantSummary,
+                                    contentDescription = null,
+                                )
+                            }
+                            Spacer(Modifier.weight(1f))
+                            Switch(checked = isMonitorRunning, onCheckedChange = { onMonitorToggle() })
+                        }
+                        Column {
+                            Text("实时处理", fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1,
+                                color = if (isMonitorRunning) activeText else colorScheme.onSurface)
+                            Text(if (isMonitorRunning) "已处理 $processedCount 张" else "点击开启",
+                                fontSize = 11.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                color = if (isMonitorRunning) activeSub else colorScheme.onSurfaceVariantSummary.copy(alpha = .66f))
+                        }
+                    }
+                }
+            }
+            // 半格 2：从相册选择
+            Card(modifier = Modifier.weight(1f).fillMaxHeight(), onClick = launchPicker, showIndication = true) {
+                BoxWithConstraints(Modifier.fillMaxSize()) {
+                    Icon(
+                        modifier = Modifier.size(64.dp).offset(x = maxWidth * .6f, y = 54.dp),
+                        imageVector = MiuixIcons.Album,
+                        tint = colorScheme.primary.copy(alpha = .12f),
+                        contentDescription = null,
+                    )
+                    Column(Modifier.fillMaxSize().padding(13.dp), verticalArrangement = Arrangement.SpaceBetween) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier.size(30.dp).clip(RoundedCornerShape(10.dp)).background(colorScheme.primary.copy(alpha = .12f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(MiuixIcons.Album, contentDescription = null, modifier = Modifier.size(17.dp), tint = colorScheme.primary)
+                            }
+                            Spacer(Modifier.weight(1f))
+                            Icon(MiuixIcons.ChevronForward, contentDescription = null, modifier = Modifier.size(15.dp), tint = colorScheme.onSurfaceVariantSummary.copy(alpha = .8f))
+                        }
+                        Column {
+                            Text("从相册选择", fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1, color = colorScheme.onSurface)
+                            Text("批量处理已有照片", fontSize = 11.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                color = colorScheme.onSurfaceVariantSummary.copy(alpha = .66f))
+                        }
+                    }
                 }
             }
         }
-        // The card itself is deliberately not clickable: entry and switch are disjoint hit regions.
-        Card(modifier = Modifier.fillMaxWidth().height(104.dp), insideMargin = PaddingValues(0.dp)) {
-            Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
+        // 全宽：联机模式（开关收到右上角，与半格卡一致）
+        Card(modifier = Modifier.fillMaxWidth().height(108.dp), insideMargin = PaddingValues(0.dp)) {
+            Box(Modifier.fillMaxSize()) {
                 Column(
-                    Modifier.weight(1f).fillMaxHeight().clickable(enabled = !tetherBusy, onClick = onTetherClick)
-                        .padding(start = 16.dp, top = 12.dp, bottom = 12.dp, end = 8.dp),
-                    verticalArrangement = Arrangement.Center,
+                    Modifier.fillMaxSize().clickable(enabled = !tetherBusy, onClick = onTetherClick)
+                        .padding(start = 16.dp, top = 13.dp, bottom = 12.dp, end = 78.dp),
+                    verticalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    Text("联机模式", fontWeight = FontWeight.SemiBold, fontSize = 18.sp, color = colorScheme.onSurface)
-                    Text(tetherSummary, fontSize = 13.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                        color = colorScheme.onSurfaceVariantSummary)
-                    Text(if (tetherBusy) "正在处理，请稍候…" else if (tetherEnabled) "连接后点击进入相机图库" else "插线并选择 PC(Tether)",
-                        fontSize = 11.sp, color = colorScheme.onSurfaceVariantSummary.copy(alpha = .7f))
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Box(
+                            Modifier.size(8.dp).clip(CircleShape).background(
+                                when {
+                                    tetherBusy -> Color(0xFFB26A00)
+                                    tetherEnabled -> Color(0xFF1F9D45)
+                                    else -> colorScheme.onSurfaceVariantSummary.copy(alpha = .4f)
+                                }
+                            )
+                        )
+                        Text("联机模式", fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = colorScheme.onSurface)
+                        Icon(MiuixIcons.ChevronForward, contentDescription = null, modifier = Modifier.size(13.dp), tint = colorScheme.onSurfaceVariantSummary.copy(alpha = .3f))
+                    }
+                    Column {
+                        Text(tetherSummary, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            color = colorScheme.onSurfaceVariantSummary)
+                        Text(if (tetherBusy) "正在处理，请稍候…" else if (tetherEnabled) "点击进入相机图库" else "插线并选择 PC(Tether)",
+                            fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            color = colorScheme.onSurfaceVariantSummary.copy(alpha = .7f))
+                    }
                 }
-                Box(Modifier.width(56.dp).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                Box(Modifier.align(Alignment.TopEnd).padding(top = 13.dp, end = 14.dp)) {
                     if (tetherBusy) CircularProgressIndicator(size = 26.dp)
                     else Switch(checked = tetherEnabled, onCheckedChange = onTetherEnabledChange, enabled = !tetherBusy)
                 }
-            }
-        }
-        Card(modifier = Modifier.fillMaxWidth().height(88.dp), insideMargin = PaddingValues(16.dp), onClick = launchPicker, showIndication = true) {
-            Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center) {
-                Text("从相册选择", fontWeight = FontWeight.Medium, fontSize = 18.sp, color = colorScheme.onSurface)
-                Text("选择图片进行处理", fontSize = 13.sp, color = colorScheme.onSurfaceVariantSummary.copy(alpha = .7f))
             }
         }
     }
