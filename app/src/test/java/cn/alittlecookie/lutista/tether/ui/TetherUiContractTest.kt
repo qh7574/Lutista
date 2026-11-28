@@ -66,4 +66,50 @@ class TetherUiContractTest {
         assertFalse(TetherParameterUi(options = listOf(option), writable = true, writing = true).enabled)
         assertTrue(TetherParameterUi(options = listOf(option), writable = true).enabled)
     }
+
+    @Test
+    fun `live view format selection follows only the explicitly applied camera index`() {
+        val options = listOf(
+            TetherLiveViewFormatUi(index = 4, label = "档位 5", dimensions = "1120 × 752"),
+            TetherLiveViewFormatUi(index = 8, label = "档位 9", dimensions = "1600 × 1072"),
+        )
+        assertEquals(null, TetherLiveViewUi(formats = options).selectedFormat)
+        assertEquals("1600 × 1072", TetherLiveViewUi(formats = options, selectedFormatIndex = 8).selectedFormat?.dimensions)
+        assertEquals(null, TetherLiveViewUi(formats = options, selectedFormatIndex = 1).selectedFormat)
+    }
+
+    @Test
+    fun `resolution availability reports no fake formats and actionable gating reasons`() {
+        val options = listOf(
+            TetherLiveViewFormatUi(0, "档位 1", "640 × 432"),
+            TetherLiveViewFormatUi(1, "档位 2", "1120 × 752"),
+        )
+        fun state(
+            connected: Boolean = true,
+            canSwitch: Boolean = true,
+            running: Boolean = true,
+            switching: Boolean = false,
+            recording: Boolean = false,
+            formats: List<TetherLiveViewFormatUi> = options,
+        ) = TetherUiState(connected = connected, capabilities = TetherCapabilities(canSwitchLiveViewFormat = canSwitch),
+            liveView = TetherLiveViewUi(running = running, switchingFormat = switching, isRecording = recording, formats = formats))
+
+        assertEquals("相机未连接", state(connected = false).liveViewFormatUnavailableReason())
+        assertEquals("正在切换预览分辨率…", state(switching = true).liveViewFormatUnavailableReason())
+        assertEquals("相机未返回可用的预览分辨率", state(formats = emptyList()).liveViewFormatUnavailableReason())
+        assertEquals("相机仅提供一种预览分辨率", state(formats = options.take(1)).liveViewFormatUnavailableReason())
+        assertEquals("当前相机能力未开放预览分辨率切换", state(canSwitch = false).liveViewFormatUnavailableReason())
+        assertEquals("录像中无法切换预览分辨率", state(recording = true).liveViewFormatUnavailableReason())
+        assertEquals("实时预览启动后可切换分辨率", state(running = false).liveViewFormatUnavailableReason())
+        val ready = state()
+        assertEquals("正在读取相机支持的预览分辨率…", ready.copy(liveView = ready.liveView.copy(starting = true)).liveViewFormatUnavailableReason())
+        assertEquals("拍摄处理中，暂时无法切换预览分辨率", ready.copy(liveView = ready.liveView.copy(captureBusy = true)).liveViewFormatUnavailableReason())
+        assertEquals(null, ready.liveViewFormatUnavailableReason())
+    }
+
+    @Test
+    fun `auto download destination is explicit and does not depend on enabled effects`() {
+        assertEquals("请先在主页设置监控文件夹", TetherLiveViewUi().autoDownloadDestinationLabel)
+        assertEquals("回传至主页监控文件夹：/storage/monitor", TetherLiveViewUi(autoDownloadDestination = "/storage/monitor").autoDownloadDestinationLabel)
+    }
 }

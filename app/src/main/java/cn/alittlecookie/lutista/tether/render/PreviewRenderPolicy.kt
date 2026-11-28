@@ -10,8 +10,12 @@ fun interface PreviewClock {
 }
 
 enum class FilterState { Off, On, Degraded }
-enum class DegradeReason { LowProcessedFps, UnsupportedResolution }
+// The first two values are retained for existing stored/UI consumers, but are never emitted by policy.
+enum class DegradeReason { LowProcessedFps, UnsupportedResolution, RenderingFailure }
 enum class PreviewFrameAction { Passthrough, Filter, Drop }
+
+/** One consumable notice per enabled filter session, rather than a repeated statistics warning. */
+enum class PreviewRenderNotice { FilterFramesDropped }
 
 data class RenderStats(
     val processedFps: Float = 0f,
@@ -25,7 +29,7 @@ data class RenderStats(
     val sourceHeight: Int = 0,
 )
 
-/** Pure monotonic-clock policy; a filter/config update never clears a degradation. */
+/** A rate deadline limits work, never filter availability. Only an actual rendering error degrades. */
 class PreviewRenderPolicy(private val clock: PreviewClock = PreviewClock.Monotonic) {
     var enabled = false
         private set
@@ -34,27 +38,25 @@ class PreviewRenderPolicy(private val clock: PreviewClock = PreviewClock.Monoton
     var degradeReason: DegradeReason? = null
         private set
     private var startedAt: Long? = null
-    private var lowSince: Long? = null
     private var nextAttemptAtScaled: Long? = null
     private val processed = ArrayDeque<Long>()
 
     fun setEnabled(value: Boolean) {
+        if (enabled == value) return
         enabled = value
         degradeReason = null
         resetWindow()
     }
 
     fun setTargetFps(value: Int) {
-        require(value in setOf(10, 15, 30)) { "Preview FPS must be 10, 15 or 30" }
+        require(value > 0) { "Preview FPS must be positive" }
         if (targetFps == value) return
         targetFps = value
-        // Changing the rate must not automatically re-enable a degraded filter.
         resetWindow()
     }
 
     private fun resetWindow() {
         startedAt = null
-        lowSince = null
         nextAttemptAtScaled = null
         processed.clear()
     }
@@ -71,10 +73,16 @@ class PreviewRenderPolicy(private val clock: PreviewClock = PreviewClock.Monoton
         return if (state(hasFilter) == FilterState.On) PreviewFrameAction.Drop else PreviewFrameAction.Passthrough
     }
 
-    /** A busy/failed filter keeps the last filtered image until policy explicitly degrades. */
-    fun completeFrame(action: PreviewFrameAction, filteredOutputAvailable: Boolean): PreviewFrameAction {
+    /** A busy GPU/null output is a skipped frame. A thrown, actual filter error is separate. */
+    fun completeFrame(
+        action: PreviewFrameAction,
+        filteredOutputAvailable: Boolean,
+        renderingFailed: Boolean = false,
+    ): PreviewFrameAction {
+        if (enabled && action == PreviewFrameAction.Filter && renderingFailed) {
+            degradeReason = DegradeReason.RenderingFailure
+        }
         if (action == PreviewFrameAction.Filter && filteredOutputAvailable) onProcessed()
-        evaluate()
         return when {
             action == PreviewFrameAction.Passthrough -> PreviewFrameAction.Passthrough
             action == PreviewFrameAction.Filter && filteredOutputAvailable -> PreviewFrameAction.Filter
@@ -83,21 +91,13 @@ class PreviewRenderPolicy(private val clock: PreviewClock = PreviewClock.Monoton
         }
     }
 
+    @Suppress("UNUSED_PARAMETER") // Actual dimensions remain part of the policy contract, not an enable gate.
     fun shouldProcess(hasFilter: Boolean, sourceWidth: Int, sourceHeight: Int): Boolean {
         if (!enabled || degradeReason != null) return false
         if (!hasFilter) { resetWindow(); return false }
-        if (sourceWidth.toLong() * sourceHeight > 640L * 480L) {
-            degradeReason = DegradeReason.UnsupportedResolution
-            return false
-        }
         val now = clock.nowMs()
-        if (startedAt == null) {
-            startedAt = now
-            lowSince = now
-        }
-        evaluate(now)
-        if (degradeReason != null) return false
-        // Keep a phase deadline, rather than restarting a rounded 34/67ms delay per frame.
+        if (startedAt == null) startedAt = now
+        // Keep a phase deadline, rather than restarting a rounded delay per frame.
         // Source/clock timestamps have millisecond precision: tolerate <1ms quantization only.
         val scaledNow = (now - checkNotNull(startedAt)) * targetFps
         val deadline = nextAttemptAtScaled
@@ -108,7 +108,11 @@ class PreviewRenderPolicy(private val clock: PreviewClock = PreviewClock.Monoton
         return true
     }
 
-    fun onProcessed() { processed.addLast(clock.nowMs()) }
+    fun onProcessed() {
+        val now = clock.nowMs()
+        trim(now)
+        processed.addLast(now)
+    }
 
     fun processedFps(): Float {
         val now = clock.nowMs()
@@ -117,22 +121,35 @@ class PreviewRenderPolicy(private val clock: PreviewClock = PreviewClock.Monoton
         return processed.size * 1_000f / elapsed
     }
 
-    fun evaluate() { evaluate(clock.nowMs()) }
-
-    private fun evaluate(now: Long) {
-        val start = startedAt ?: return
-        trim(now)
-        if (now - start < 1_000L || degradeReason != null) return
-        if (processed.size >= targetFps * 0.8f) {
-            lowSince = null
-        } else {
-            val low = lowSince ?: now.also { lowSince = it }
-            if (now - low >= 3_000L) degradeReason = DegradeReason.LowProcessedFps
-        }
-    }
+    /** Statistics maintenance has no authority to turn a filter off. */
+    fun evaluate() { trim(clock.nowMs()) }
 
     private fun trim(now: Long) {
         while (processed.isNotEmpty() && processed.peekFirst() <= now - 1_000L) processed.removeFirst()
+    }
+}
+
+/** A filter session changes only on an enable transition; stale/closed-session drops are ignored. */
+internal class PreviewFilterDropGate {
+    private var enabled = false
+    private var session = 0L
+    private var warned = false
+
+    @Synchronized fun setEnabled(value: Boolean) {
+        if (enabled == value) return
+        enabled = value
+        session++
+        warned = false
+    }
+
+    @Synchronized fun currentSession(): Long? = session.takeIf { enabled }
+
+    @Synchronized fun isCurrent(value: Long): Boolean = enabled && value == session
+
+    @Synchronized fun onDropped(value: Long?): Boolean {
+        if (value == null || !enabled || value != session || warned) return false
+        warned = true
+        return true
     }
 }
 

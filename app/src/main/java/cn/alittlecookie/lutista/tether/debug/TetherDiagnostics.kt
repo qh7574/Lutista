@@ -238,6 +238,8 @@ class TetherDiagnostics(
         forceTimeout(narrow(transport), diagnostics)
 
     private fun narrow(delegate: PtpTransport): Transport = object : Transport {
+        override val openRecoveryMs: Long get() = delegate.openRecoveryMs
+        override val cameraSilent: Boolean get() = delegate.cameraSilent
         override suspend fun transaction(op: PtpOp, expectedData: Boolean, dataOut: ByteArray?, dataSink: ((ByteArray, Int) -> Unit)?, timeoutMs: Int): PtpResponse =
             delegate.transaction(op, expectedData, dataOut, dataSink, timeoutMs)
         override suspend fun drainEvents(timeoutMs: Int): List<PtpEvent> = delegate.drainEvents(timeoutMs)
@@ -268,6 +270,6 @@ class TetherDiagnostics(
 
     companion object {
         internal const val BUSY_MESSAGE = "同一个 UsbDeviceConnection 上出现了并发 bulk 收发（约束 3 禁止）"
-        private const val FATAL_MESSAGE = "传输层已置 fatal（上一次超时/NACK），必须拔插相机后重建连接"
+        private const val FATAL_MESSAGE = "传输层已置 fatal（上一次超时/NACK），请把相机电源关掉再打开后重新连接"
     }
 }

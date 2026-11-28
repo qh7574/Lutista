@@ -131,17 +131,41 @@ class TransferRecoveryTest {
         } finally { engine.close() }
     }
 
-    @Test fun rawMovNoEffectAndDisabledNeverCreateAutomaticRows() = runBlocking {
-        for (mode in 0..3) {
+    @Test fun rawMovAndDisabledNeverCreateAutomaticRows() = runBlocking {
+        for (mode in 0..2) {
             val info = when (mode) { 0 -> jpg(name = "IMG.RW2", format = 0xb103); 1 -> jpg(name = "VID.MOV", format = 0x300d); else -> jpg() }
             val store = Store(); val targets = Targets(); val submit = Submit()
-            if (mode == 2) submit.effects = TetherEffects()
-            if (mode == 3) submit.enabled = false
+            if (mode == 2) submit.enabled = false
             val source = Source(CameraSessionKey("serial", 10), listOf(info)); val engine = TransferEngine(this, store, targets, submit)
             try {
                 engine.startSession(source); engine.onObjectAdded(source.sessionKey, info.handle)
                 engine.completeBaseline(source.sessionKey, listOf(info), setOf(info.handle)); idle(engine)
                 assertNull(store.find(key(info), TransferKind.AUTO)); assertTrue(targets.prepared.isEmpty()); assertTrue(submit.calls.isEmpty())
+            } finally { engine.close() }
+        }
+    }
+
+    @Test fun automaticJpegWithoutEffectsStillReturnsOriginalBeforeAndAfterBaseline() = runBlocking {
+        for (effects in listOf(null, TetherEffects())) for (early in listOf(true, false)) {
+            val info = jpg(); val store = Store(); val targets = Targets(); val submit = Submit()
+            submit.effects = effects
+            val source = Source(CameraSessionKey("serial", 10), listOf(info))
+            val engine = TransferEngine(this, store, targets, submit)
+            try {
+                engine.startSession(source)
+                if (!early) engine.completeBaseline(source.sessionKey, emptyList())
+                engine.onObjectAdded(source.sessionKey, info.handle)
+                if (early) engine.completeBaseline(source.sessionKey, listOf(info), setOf(info.handle))
+                idle(engine)
+                engine.onObjectAdded(source.sessionKey, info.handle)
+                idle(engine)
+                val row = requireNotNull(store.find(key(info), TransferKind.AUTO))
+                assertEquals(TransferState.DONE, row.state)
+                assertEquals("/original/IMG.JPG", row.targetPath)
+                assertEquals(4L, row.bytesDone)
+                assertNull(row.taskId)
+                assertEquals(listOf(info.handle), source.streamed)
+                assertTrue(submit.calls.isEmpty())
             } finally { engine.close() }
         }
     }

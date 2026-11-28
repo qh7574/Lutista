@@ -45,15 +45,16 @@ class TetherUiSmokeActivity : ComponentActivity() {
             "preview" -> TetherPage.Preview
             else -> TetherPage.Gallery
         }
-        setContent { LutistaTheme { SmokeContent(page, ::finish) } }
+        val formatCase = intent.getStringExtra("formats")
+        setContent { LutistaTheme { SmokeContent(page, formatCase, ::finish) } }
     }
 }
 
 @Composable
-private fun SmokeContent(initialPage: TetherPage, finish: () -> Unit) {
+private fun SmokeContent(initialPage: TetherPage, formatCase: String?, finish: () -> Unit) {
     val image = remember { SmokeBitmapSource() }
     DisposableEffect(image) { onDispose { image.close() } }
-    var state by remember { mutableStateOf(smokeState(initialPage, image)) }
+    var state by remember { mutableStateOf(smokeState(initialPage, image).withFormatCase(formatCase)) }
     LaunchedEffect(Unit) {
         delay(900)
         state = state.copy(gallery = state.gallery.copy(enumerating = false, enumeratedCount = 24,
@@ -109,9 +110,27 @@ private fun smokeState(page: TetherPage, source: TetherImageSource): TetherUiSta
             aperture = TetherParameterUi(value = 28, displayValue = "F2.8", unavailableReason = "模拟只读：请使用相机转盘"),
             whiteBalance = parameter(0, "自动", 0L to "自动", 1L to "日光", 2L to "阴天"),
             photoStyle = 1, originalPhotoStyle = 1, photoStyleValues = listOf(1, 2, 3, 8)),
-        liveView = TetherLiveViewUi(image = image, running = true, receivedFps = 29.8f, processedFps = 15f,
-            formats = listOf(TetherLiveViewFormatUi(0, "模拟标准", "640 × 432"), TetherLiveViewFormatUi(1, "模拟高清", "1024 × 768")),
-            filterAvailable = true, globalFilterName = "模拟全局滤镜", autoDownloadAvailable = true))
+        liveView = TetherLiveViewUi(image = image, running = true, selectedFormatIndex = 0,
+            receivedDimensions = "640 × 432", receivedFps = 29.8f, processedFps = 15f,
+            formats = listOf(
+                TetherLiveViewFormatUi(0, "模拟档位 1", "640 × 480"),
+                TetherLiveViewFormatUi(1, "模拟档位 2", "1120 × 840"),
+                TetherLiveViewFormatUi(2, "模拟档位 3", "1600 × 1200"),
+            ),
+            filterAvailable = true, globalFilterName = "模拟全局滤镜", autoDownloadAvailable = true,
+            autoDownloadDestination = "模拟 / monitor"))
+}
+
+private fun TetherUiState.withFormatCase(case: String?): TetherUiState = when (case) {
+    "empty" -> copy(capabilities = capabilities.copy(canSwitchLiveViewFormat = false),
+        liveView = liveView.copy(formats = emptyList(), selectedFormatIndex = -1))
+    "single" -> copy(capabilities = capabilities.copy(canSwitchLiveViewFormat = false),
+        liveView = liveView.copy(formats = liveView.formats.take(1), selectedFormatIndex = liveView.formats.firstOrNull()?.index ?: -1))
+    "unsupported" -> copy(capabilities = capabilities.copy(canSwitchLiveViewFormat = false))
+    "recording" -> copy(liveView = liveView.copy(isVideoMode = true, isRecording = true))
+    "switching" -> copy(liveView = liveView.copy(switchingFormat = true))
+    "restored" -> copy(liveView = liveView.copy(selectedFormatIndex = 2, receivedDimensions = "1600 × 1072"))
+    else -> this
 }
 
 /** Local presentation reducer: intentionally exhaustive fallthrough; never delegates side effects. */
@@ -147,7 +166,8 @@ private fun reduceSmoke(state: TetherUiState, action: TetherUiAction): TetherUiS
         }
         is TetherUiAction.SetPhotoStyle -> state.copy(parameters = state.parameters.copy(photoStyle = action.value))
         TetherUiAction.RestorePhotoStyle -> state.copy(parameters = state.parameters.copy(photoStyle = state.parameters.originalPhotoStyle))
-        is TetherUiAction.SetLiveViewFormat -> state.copy(liveView = state.liveView.copy(selectedFormatIndex = action.index, filterEnabled = false, filterAvailable = action.index == 0, filterUnavailableReason = if (action.index == 0) null else "模拟：高清格式不可用预览滤镜"))
+        is TetherUiAction.SetLiveViewFormat -> state.copy(liveView = state.liveView.copy(selectedFormatIndex = action.index,
+            receivedDimensions = listOf("640 × 432", "1120 × 752", "1600 × 1072").getOrNull(action.index)))
         is TetherUiAction.SetTargetFps -> state.copy(liveView = state.liveView.copy(targetFps = action.fps, processedFps = action.fps.toFloat()))
         is TetherUiAction.SetPreviewFilter -> state.copy(liveView = state.liveView.copy(filterEnabled = action.enabled))
         is TetherUiAction.SetAutoDownload -> state.copy(liveView = state.liveView.copy(autoDownload = action.enabled))

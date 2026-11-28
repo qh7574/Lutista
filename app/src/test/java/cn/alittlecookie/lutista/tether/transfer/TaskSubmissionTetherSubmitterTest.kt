@@ -8,9 +8,6 @@ import cn.alittlecookie.lutista.data.repository.FilterRepository
 import cn.alittlecookie.lutista.data.repository.WatermarkRepository
 import cn.alittlecookie.lutista.manager.SettingsManager
 import cn.alittlecookie.lutista.service.TaskSubmissionManager
-import cn.alittlecookie.lutista.tether.objects.CameraObject
-import cn.alittlecookie.lutista.tether.objects.CameraObjectSource
-import cn.alittlecookie.lutista.tether.objects.CameraSessionKey
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -45,26 +42,12 @@ class TaskSubmissionTetherSubmitterTest {
         }
     }
 
-    @Test fun disabledFilterWithoutWatermarkIsNotAnAutomaticEffect() = runBlocking {
+    @Test fun disabledFilterWithoutWatermarkStillAllowsAutomaticOriginalReturn() = runBlocking {
         val fixture = Fixture(enabledFilter = false, withWatermark = false)
         assertTrue(fixture.adapter.automaticEnabled())
         assertNull(fixture.adapter.resolveEffects())
-        val source = mockk<CameraObjectSource>()
-        val session = CameraSessionKey("serial", 1L)
-        every { source.sessionKey } returns session
-        coEvery { source.getObjectInfo(7L) } returns CameraObject(7, 1, 0x3801, 0, 4, "IMG.JPG", "raw", false)
-        val store = mockk<TransferStore>()
-        val targets = mockk<TransferTargetStorage>()
-        val engine = TransferEngine(this, store, targets, fixture.adapter)
-        try {
-            engine.startSession(source)
-            engine.onObjectAdded(session, 7L)
-            engine.awaitIdle()
-            coVerify(exactly = 0) { store.insertIfAbsent(any()) }
-            coVerify(exactly = 0) { targets.prepare(any(), any(), any()) }
-            coVerify(exactly = 0) { fixture.submissions.submitTether(any(), any(), any(), any(), any(), any()) }
-        } finally { engine.close() }
-        coVerify(exactly = 2) { fixture.filterDao.getFilterById(11L) }
+        coVerify(exactly = 0) { fixture.submissions.submitTether(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 1) { fixture.filterDao.getFilterById(11L) }
     }
 
     @Test fun disabledFilterWithWatermarkSubmitsExplicitZeroFilter() = runBlocking {

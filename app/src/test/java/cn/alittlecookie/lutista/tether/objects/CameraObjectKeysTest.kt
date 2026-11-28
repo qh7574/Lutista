@@ -24,14 +24,15 @@ class CameraObjectKeysTest {
         assertEquals(key, CameraObjectKeys.transferDedupeKey("serial", info.copy(handle = 99)))
         val alternatives = listOf(
             CameraObjectKeys.transferDedupeKey("other", info),
+            CameraObjectKeys.transferDedupeKey("serial", info.copy(storageId = 7)),
             CameraObjectKeys.transferDedupeKey("serial", info.copy(name = "OTHER.JPG")),
             CameraObjectKeys.transferDedupeKey("serial", info.copy(size = 301)),
             CameraObjectKeys.transferDedupeKey("serial", info.copy(dateTakenRaw = "raw-date")),
         )
         assertFalse(alternatives.contains(key))
         assertNotEquals(
-            CameraObjectKeys.transferDedupeKey("a", "b:c", 1, "d"),
-            CameraObjectKeys.transferDedupeKey("a:b", "c", 1, "d"),
+            CameraObjectKeys.transferDedupeKey("a", 1, "b:c", 1, "d"),
+            CameraObjectKeys.transferDedupeKey("a:b", 1, "c", 1, "d"),
         )
     }
 

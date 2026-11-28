@@ -54,6 +54,11 @@ class TetherDiagLogger internal constructor(
 
     /** Both tags receive exactly the same string, including the one monotonic timestamp. */
     fun log(category: String, message: String) {
+        // 会话生命周期必须始终可追：诊断开关是默认关闭的，而"上次为什么断、为什么连不上"
+        // 恰恰只能从这几条记录看出来（真机日志 2026-11-27 就完全没有这类证据）。
+        if (category in LIFECYCLE_CATEGORIES) {
+            runCatching { Timber.tag(TAG_LIFECYCLE).i("%s %s", category, message) }
+        }
         if (!enabled) return
         synchronized(lock) {
             if (!enabled || categoryGroup(category) in disabledCategories) return
@@ -173,6 +178,15 @@ class TetherDiagLogger internal constructor(
     companion object {
         const val TAG_VERIFY = "T01Verify"
         const val TAG_DIAG = "T02Diag"
+
+        /** 始终输出的会话生命周期 tag（不走 T01b 开关）。 */
+        const val TAG_LIFECYCLE = "TetherLifecycle"
+
+        /**
+         * 这些 category 无论诊断开关如何都镜像到 [TAG_LIFECYCLE]：
+         * 连接成功/失败、关闭原因、探测失败。数量与普通事务无关，日志量可控。
+         */
+        private val LIFECYCLE_CATEGORIES = setOf("connect", "close", "probe", "CLAIM", "FAULT")
         private val CATEGORIES = setOf("CAPS", "ENDPOINT_STATE", "FILL", "WRITE", "FRAME", "TRANSACTION", "EVENTS", "THREAD_CLAIM")
         private const val MAX_SNAPSHOT_LINES = 512
     }

@@ -13,7 +13,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.IOException
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 /** One bounded queue / one streaming object. No camera handle survives a session change. */
@@ -33,14 +32,33 @@ class TransferEngine(
         var observedEventHandles: Set<Long> = emptySet()
         val baselineWrittenKeys = linkedSetOf<String>()
     }
-    private data class Work(val session: Session, val info: CameraObject, val record: TransferRecord) {
+    private class Work(val session: Session, val info: CameraObject, val record: TransferRecord) {
         val token get() = "${session.key.id}:${record.kind}:${record.key}"
+        var started = false
+        var finished = false
+        var cancelled = false
+        var latest: TransferProgress? = null
+        val entries = mutableListOf<BatchEntry>()
+    }
+    private class BatchEntry(val batchId: Long, val index: Int, var value: TransferProgress) {
+        var started = false
+        var settled = false
+        var cancelled = false
+    }
+    private class Batch(val id: Long, val session: Session, val kind: TransferKind, val entries: List<BatchEntry>) {
+        var currentIndex = 0
     }
     private val engineScope = CoroutineScope(scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job]))
     private val gate = Mutex()
     private val lifecycle = Mutex()
     private val queue = Channel<Work>(queueCapacity.also { require(it > 0) })
-    private val scheduled = ConcurrentHashMap.newKeySet<String>()
+    // Synchronous chunk callbacks and admission publish a single coherent progress snapshot here.
+    private val progressLock = Any()
+    private val scheduled = linkedMapOf<String, Work>()
+    private val batchRecords = linkedMapOf<Long, Batch>()
+    private var nextBatchId = 0L
+    private val mutableBatches = MutableStateFlow<Map<Long, TransferBatchProgress>>(emptyMap())
+    val batches: StateFlow<Map<Long, TransferBatchProgress>> = mutableBatches.asStateFlow()
     private val count = AtomicInteger()
     private val idle = MutableStateFlow(true)
     private val paused = MutableStateFlow(false)
@@ -57,7 +75,15 @@ class TransferEngine(
             for (work in queue) {
                 try {
                     paused.first { !it }
-                    if (session !== work.session) continue
+                    val admitted = synchronized(progressLock) {
+                        if (work.finished || session !== work.session) false else {
+                            work.started = true
+                            val value = requireNotNull(work.latest)
+                            publishLocked(work, value)
+                            true
+                        }
+                    }
+                    if (!admitted) continue
                     supervisorScope {
                         val job = launch {
                             try { process(work) }
@@ -74,10 +100,7 @@ class TransferEngine(
                         foreground = null
                     }
                 } finally {
-                    scheduled.remove(work.token)
-                    val remaining = count.decrementAndGet()
-                    mutableProgress.value = mutableProgress.value.copy(queued = remaining.coerceAtLeast(0))
-                    if (remaining == 0) idle.value = true
+                    synchronized(progressLock) { finishWorkLocked(work, abandoned = session !== work.session) }
                 }
             }
         }
@@ -88,8 +111,21 @@ class TransferEngine(
         stopSessionInternal()
         gate.withLock { session = Session(source) }
         paused.value = false
-        mutableProgress.value = TransferProgress(sessionKey = source.sessionKey)
-        mutableTransfers.value = emptyMap()
+        synchronized(progressLock) {
+            batchRecords.clear()
+            mutableBatches.value = emptyMap()
+            mutableProgress.value = TransferProgress(sessionKey = source.sessionKey)
+            mutableTransfers.value = emptyMap()
+        }
+    }
+
+    /** Best-effort removal of private staging folders that no journal owns. */
+    /** Reclaim private staging that no committed destination or pending recovery still needs. */
+    suspend fun sweepOrphanedStaging() {
+        val protected = runCatching {
+            store.recoverable().map { "${it.kind.name}-${it.key}" }.toSet()
+        }.getOrDefault(emptySet())
+        targets.sweepOrphanedStaging(protected)
     }
 
     /** Disconnect/close. Cancels the current transaction, drains old work, keeps durable records. */
@@ -100,8 +136,11 @@ class TransferEngine(
         foreground?.cancelAndJoin()
         while (true) {
             val stale = queue.tryReceive().getOrNull() ?: break
-            scheduled.remove(stale.token)
-            if (count.decrementAndGet() == 0) idle.value = true
+            synchronized(progressLock) { finishWorkLocked(stale, abandoned = true) }
+        }
+        synchronized(progressLock) {
+            // Also settle registered items whose producer was blocked on the bounded channel.
+            scheduled.values.toList().filter { !it.started }.forEach { finishWorkLocked(it, abandoned = true) }
         }
         // Wake a consumer holding a stale item behind the pause gate.
         paused.value = false
@@ -158,7 +197,8 @@ class TransferEngine(
             mutableProgress.value = mutableProgress.value.copy(error = e.message ?: "GetObjectInfo failed")
             throw e // Caller must not acknowledge the durable camera event.
         }
-        val eligible = isJpeg(info) && taskSubmitter.automaticEnabled() && taskSubmitter.resolveEffects()?.valid == true
+        // Receiving the original is independent of the optional image-processing effects.
+        val eligible = isJpeg(info) && taskSubmitter.automaticEnabled()
         val ready = gate.withLock {
             if (session !== current) throw CancellationException("Stale camera event")
             if (eligible) {
@@ -176,13 +216,13 @@ class TransferEngine(
 
     suspend fun retry(sessionKey: CameraSessionKey, info: CameraObject, kind: TransferKind = TransferKind.MANUAL) {
         require(kind == TransferKind.MANUAL) { "Automatic retries are event-driven" }
-        enqueue(session?.takeIf { it.key == sessionKey } ?: return, info, kind, forceRetry = true)
+        enqueueManual(sessionKey, listOf(info))
     }
 
     /** Explicit manual selection is the only RAW/MOV entry. It does not bypass session checks. */
     suspend fun enqueueManual(sessionKey: CameraSessionKey, objects: List<CameraObject>) {
         val current = session?.takeIf { it.key == sessionKey } ?: return
-        for (info in objects) enqueue(current, info, TransferKind.MANUAL, forceRetry = true)
+        enqueueBatch(current, objects, TransferKind.MANUAL, forceRetry = true, includeCompleted = true)
     }
 
     fun stableKey(sessionKey: CameraSessionKey, info: CameraObject): String =
@@ -210,30 +250,101 @@ class TransferEngine(
     suspend fun close() { stopSession(); queue.close(); engineScope.cancel() }
 
     private suspend fun enqueue(current: Session, info: CameraObject, kind: TransferKind, forceRetry: Boolean = false) {
-        if (session !== current || info.isDir) return
-        // Check before creating ANY AUTO record. Extension alone is not sufficient.
-        if (kind == TransferKind.AUTO && (!isJpeg(info) || !taskSubmitter.automaticEnabled() ||
-                    taskSubmitter.resolveEffects()?.valid != true)) return
-        val key = key(current, info)
-        val existing = store.find(key, kind)
-        if (kind == TransferKind.AUTO && existing == null && store.find(key, TransferKind.BASELINE) != null &&
-            !eventOwnsBaseline(current, info, key)) return
-        if (existing?.state == TransferState.DONE) return
-        // Recovery includes committed-but-not-submitted states. A fresh session rebinds
-        // the durable identity to its new handle; only explicit selection retries terminal failures.
-        if (existing?.state in setOf(TransferState.FAILED, TransferState.CANCELLED) && !forceRetry) return
-        val row = existing ?: store.insertIfAbsent(record(info, key, kind))
-        val work = Work(current, info, row.copy(handle = info.handle,
-            state = if (forceRetry) TransferState.PENDING else row.state, error = if (forceRetry) null else row.error))
-        if (!scheduled.add(work.token)) return
-        count.incrementAndGet()
-        idle.value = false
-        mutableProgress.value = mutableProgress.value.copy(queued = count.get())
-        try { queue.send(work) }
-        catch (e: Throwable) {
-            scheduled.remove(work.token)
-            if (count.decrementAndGet() == 0) idle.value = true
-            throw e
+        enqueueBatch(current, listOf(info), kind, forceRetry, includeCompleted = false)
+    }
+
+    private suspend fun enqueueBatch(
+        current: Session, objects: List<CameraObject>, kind: TransferKind,
+        forceRetry: Boolean, includeCompleted: Boolean,
+    ) {
+        val work = gate.withLock {
+            if (session !== current) return
+            val candidates = mutableListOf<Pair<CameraObject, TransferRecord>>()
+            for (info in objects.filterNot { it.isDir }.distinctBy { key(current, it) }) {
+                // Keep AUTO/baseline eligibility and durable ACK semantics independent of UI batches.
+                if (kind == TransferKind.AUTO && (!isJpeg(info) || !taskSubmitter.automaticEnabled())) continue
+                val identity = key(current, info)
+                val existing = store.find(identity, kind)
+                if (kind == TransferKind.AUTO && existing == null && store.find(identity, TransferKind.BASELINE) != null &&
+                    !eventOwnsBaseline(current, info, identity)) continue
+                if (!includeCompleted && existing?.state == TransferState.DONE) continue
+                if (existing?.state in setOf(TransferState.FAILED, TransferState.CANCELLED) && !forceRetry) continue
+                val row = existing ?: store.insertIfAbsent(record(info, identity, kind))
+                candidates += info to row
+            }
+            if (candidates.isEmpty()) return
+            synchronized(progressLock) {
+                if (session !== current) return
+                // Repeated camera events remain idempotent and do not manufacture new batches.
+                if (!includeCompleted && candidates.all { (info, row) ->
+                    scheduled.containsKey("${current.key.id}:$kind:${row.key}") ||
+                        mutableTransfers.value["$kind:${key(current, info)}"]?.state == TransferState.DONE
+                }) return
+                val batchId = ++nextBatchId
+                val entries = mutableListOf<BatchEntry>()
+                val toSend = mutableListOf<Work>()
+                val pending = mutableTransfers.value.toMutableMap()
+                for ((offset, candidate) in candidates.withIndex()) {
+                    val (info, row) = candidate
+                    val itemKey = "$kind:${row.key}"
+                    val token = "${current.key.id}:$itemKey"
+                    val running = scheduled[token]
+                    val previous = pending[itemKey]
+                    val alreadyDone = row.state == TransferState.DONE || previous?.state == TransferState.DONE
+                    val initial = when {
+                        running != null -> requireNotNull(running.latest)
+                        alreadyDone && previous?.state == TransferState.DONE -> previous
+                        alreadyDone -> TransferProgress(current.key, row.key, row.name, row.state,
+                            row.bytesDone, row.size, count.get(), paused.value, row.error, info.handle, kind,
+                            // DONE is persisted only after commit; PENDING/RUNNING targetPath can be staging.
+                            row.targetPath.takeIf { it.isNotBlank() })
+                        else -> TransferProgress(current.key, row.key, row.name, TransferState.PENDING,
+                            0, row.size, count.get(), paused.value, null, info.handle, kind)
+                    }.copy(batchId = batchId, batchIndex = offset + 1, batchTotal = candidates.size)
+                    val entry = BatchEntry(batchId, offset + 1, initial)
+                    entries += entry
+                    if (alreadyDone && running == null) entry.settled = true
+                    else {
+                        val item = running ?: Work(current, info, row.copy(handle = info.handle,
+                            state = if (forceRetry) TransferState.PENDING else row.state,
+                            error = if (forceRetry) null else row.error)).also {
+                            scheduled[token] = it
+                            count.incrementAndGet()
+                            idle.value = false
+                            toSend += it
+                        }
+                        entry.started = item.started
+                        item.entries += entry
+                        if (item.latest == null) item.latest = initial
+                    }
+                    pending[itemKey] = initial
+                }
+                val batch = Batch(batchId, current, kind, entries).also {
+                    it.currentIndex = entries.firstOrNull { entry -> entry.started }?.index ?: 0
+                }
+                batchRecords[batchId] = batch
+                refreshBatchesLocked(setOf(batchId))
+                // All selection members are visible before the first send can resume the consumer.
+                mutableTransfers.value = pending
+                val active = foreground?.isActive == true
+                if (!active) mutableProgress.value = entries.first().value.copy(queued = count.get())
+                toSend
+            }
+        }
+        var sent = 0
+        try {
+            for (item in work) {
+                if (session !== current) throw CancellationException("Stale camera session")
+                if (!synchronized(progressLock) { item.finished }) queue.send(item)
+                sent++
+            }
+        } catch (failure: Throwable) {
+            synchronized(progressLock) {
+                // send has prompt cancellation: an item may already have been picked up.
+                // Only abandon items the consumer has not started; finish is idempotent.
+                work.drop(sent).filter { !it.started }.forEach { finishWorkLocked(it, abandoned = true) }
+            }
+            throw failure
         }
     }
 
@@ -275,7 +386,7 @@ class TransferEngine(
             }
             row = row.copy(state = TransferState.DOWNLOADED, targetPath = downloaded.targetPath, bytesDone = downloaded.bytes, error = null, updatedAt = now())
             store.save(row)
-            publish(work, row, row.bytesDone)
+            publish(work, row, row.bytesDone, downloaded)
             val effects = if (isJpeg(work.info)) taskSubmitter.resolveEffects()?.takeIf { it.valid } else null
             if (effects != null) {
                 check(!downloaded.localPath.isNullOrBlank()) { "Processing needs a readable original file" }
@@ -288,7 +399,21 @@ class TransferEngine(
             row = row.copy(state = TransferState.DONE, updatedAt = now())
             store.save(row)
             publish(work, row, row.bytesDone, downloaded)
+            if (row.taskId == null) {
+                // No image-processing task owns the readable staging copy, so the committed
+                // destination is the only copy the user needs.
+                val committed = requireNotNull(downloaded) { "Committed transfer missing after DONE" }
+                val cleanupFailure = runCatching { targets.release(row, committed) }.exceptionOrNull()
+                if (cleanupFailure != null) {
+                    row = row.copy(error = listOfNotNull(row.error,
+                        "Staging cleanup failed: ${cleanupFailure.message ?: cleanupFailure.javaClass.simpleName}")
+                        .joinToString("; "), updatedAt = now())
+                    store.save(row)
+                    publish(work, row, row.bytesDone, downloaded)
+                }
+            }
         } catch (e: CancellationException) {
+            work.cancelled = true
             withContext(NonCancellable) {
                 // Record recoverability before cleanup: a failed delete must not lose the row.
                 // Committed originals are retained and recoverable; only partial bytes are removed.
@@ -301,7 +426,7 @@ class TransferEngine(
                     row = row.copy(error = listOfNotNull(row.error, cleanup).joinToString("; "))
                     store.save(row)
                 }
-                publish(work, row, row.bytesDone)
+                publish(work, row, row.bytesDone, downloaded)
             }
         } catch (e: Exception) {
             withContext(NonCancellable) {
@@ -313,7 +438,7 @@ class TransferEngine(
                     row = row.copy(error = listOfNotNull(row.error, cleanup).joinToString("; "))
                     store.save(row)
                 }
-                publish(work, row, row.bytesDone)
+                publish(work, row, row.bytesDone, downloaded)
             }
         } finally {
             // Close may report a delayed filesystem error after the original/task committed.
@@ -341,12 +466,65 @@ class TransferEngine(
         }
     }
     private fun publish(work: Work, row: TransferRecord, bytes: Long, downloaded: DownloadedTransfer? = null) {
-        val previous = mutableTransfers.value["${row.kind}:${row.key}"]
-        val value = TransferProgress(work.session.key, row.key, row.name, row.state,
-            bytes, row.size, count.get(), paused.value, row.error, work.info.handle, row.kind,
-            downloaded?.targetPath ?: previous?.targetPath, downloaded?.localPath ?: previous?.localPath)
-        mutableProgress.value = value
-        mutableTransfers.value = mutableTransfers.value + ("${row.kind}:${row.key}" to value)
+        synchronized(progressLock) {
+            if (work.finished) return
+            val previous = work.latest
+            val value = TransferProgress(work.session.key, row.key, row.name, row.state,
+                bytes, row.size, count.get(), paused.value, row.error, work.info.handle, row.kind,
+                downloaded?.targetPath ?: previous?.targetPath, downloaded?.localPath ?: previous?.localPath)
+            publishLocked(work, value)
+        }
+    }
+
+    /** All callers hold progressLock; never expose destinationHint/row.targetPath before commit. */
+    private fun publishLocked(work: Work, value: TransferProgress) {
+        work.latest = value
+        work.entries.forEach { entry ->
+            entry.started = work.started
+            entry.cancelled = work.cancelled
+            entry.value = value.copy(batchId = entry.batchId, batchIndex = entry.index,
+                batchTotal = batchRecords[entry.batchId]?.entries?.size ?: entry.value.batchTotal)
+            if (work.started) batchRecords[entry.batchId]?.currentIndex = entry.index
+        }
+        refreshBatchesLocked(work.entries.mapTo(linkedSetOf()) { it.batchId })
+        // A repeated manual selection can observe the same work without another camera read.
+        val primary = work.entries.lastOrNull { batchRecords[it.batchId]?.kind == TransferKind.MANUAL }
+            ?: work.entries.lastOrNull()
+        val published = primary?.value ?: value
+        mutableTransfers.value = mutableTransfers.value + ("${work.record.kind}:${work.record.key}" to published)
+        mutableProgress.value = published
+    }
+
+    private fun finishWorkLocked(work: Work, abandoned: Boolean) {
+        if (work.finished) return
+        if (abandoned && !work.started) {
+            work.cancelled = true
+            publishLocked(work, requireNotNull(work.latest).copy(state = TransferState.CANCELLED,
+                error = "Camera session closed before transfer started"))
+        }
+        work.finished = true
+        work.entries.forEach { it.settled = true; it.cancelled = work.cancelled }
+        refreshBatchesLocked(work.entries.mapTo(linkedSetOf()) { it.batchId })
+        if (scheduled[work.token] === work) scheduled.remove(work.token)
+        val remaining = count.decrementAndGet().coerceAtLeast(0)
+        mutableProgress.value = mutableProgress.value.copy(queued = remaining)
+        if (remaining == 0) idle.value = true
+    }
+
+    private fun refreshBatchesLocked(ids: Set<Long>) {
+        val snapshots = mutableBatches.value.toMutableMap()
+        for (id in ids) {
+            val batch = batchRecords[id] ?: continue
+            val allDone = batch.entries.all { it.settled }
+            snapshots[id] = TransferBatchProgress(id, batch.session.key, batch.kind, batch.entries.size,
+                currentIndex = if (allDone) batch.entries.size else batch.currentIndex,
+                completedCount = batch.entries.count { it.value.state in committedTransferStates },
+                failedCount = batch.entries.count { it.value.state in setOf(TransferState.FAILED, TransferState.SUBMISSION_FAILED) },
+                cancelledCount = batch.entries.count { it.cancelled }, active = !allDone,
+                bytesDone = batch.entries.sumOf { it.value.bytesDone.coerceAtLeast(0) },
+                totalBytes = batch.entries.sumOf { it.value.totalBytes.coerceAtLeast(0) })
+        }
+        mutableBatches.value = snapshots
     }
     private fun eventOwnsBaseline(session: Session, info: CameraObject, key: String): Boolean =
         key in session.baselineWrittenKeys && info.handle in session.observedEventHandles

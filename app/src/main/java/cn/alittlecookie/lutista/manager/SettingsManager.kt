@@ -371,10 +371,10 @@ class SettingsManager(
     fun getTetherLiveViewFilterEnabledSync(): Boolean = runBlocking { tetherLiveViewFilterEnabled.first() }
 
     val tetherLiveViewFilterFps: Flow<Int> = dataStore.data.map {
-        (it[TETHER_LIVE_VIEW_FILTER_FPS_KEY] ?: 15).takeIf { fps -> fps in setOf(10, 15, 30) } ?: 15
+        (it[TETHER_LIVE_VIEW_FILTER_FPS_KEY] ?: 15).takeIf { fps -> fps > 0 } ?: 15
     }
     suspend fun setTetherLiveViewFilterFps(value: Int) {
-        require(value in setOf(10, 15, 30)) { "Live view filter FPS must be 10, 15 or 30" }
+        require(value > 0) { "Live view filter FPS must be positive" }
         dataStore.edit { it[TETHER_LIVE_VIEW_FILTER_FPS_KEY] = value }
     }
     fun getTetherLiveViewFilterFpsSync(): Int = runBlocking { tetherLiveViewFilterFps.first() }

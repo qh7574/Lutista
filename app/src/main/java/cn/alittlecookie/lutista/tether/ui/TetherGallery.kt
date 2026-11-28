@@ -104,6 +104,9 @@ internal fun TetherGallery(state: TetherUiState, onAction: (TetherUiAction) -> U
             gallery.clockWarning?.let { warning ->
                 TetherNotice(warning, Modifier.padding(horizontal = 12.dp), "知道了") { onAction(TetherUiAction.DismissClockWarning) }
             }
+            gallery.directoryWarning?.let { warning ->
+                TetherNotice(warning, Modifier.padding(horizontal = 12.dp))
+            }
             gallery.error?.let { error ->
                 if (state.connected) TetherNotice(error, Modifier.padding(horizontal = 12.dp), "重试") { onAction(TetherUiAction.RefreshGallery) }
                 else TetherNotice("$error\n请重新接入 USB，并在相机上选择 PC(Tether)。", Modifier.padding(horizontal = 12.dp))

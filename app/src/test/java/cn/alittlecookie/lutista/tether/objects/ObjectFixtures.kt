@@ -16,7 +16,7 @@ internal fun objectInfo(
     val strings = ptp(name) + ptp(date)
     return ByteBuffer.allocate(filenameOffset + strings.size).order(ByteOrder.LITTLE_ENDIAN).apply {
         putInt(0, storage.toInt()); putShort(4, format.toShort())
-        putInt(8, size.toInt()); putInt(34, parent.toInt())
+        putInt(8, size.toInt()); putInt(38, parent.toInt())
         position(filenameOffset); put(strings)
     }.array()
 }
@@ -34,6 +34,7 @@ internal class FakeObjectAccess : ObjectAccess {
     var children: Map<Long, List<Long>> = emptyMap()
     var infos: Map<Long, ByteArray> = emptyMap()
     var infoProvider: ((Long) -> ByteArray)? = null
+    var handlesProvider: ((Long) -> PtpData)? = null
     var thumbnail = byteArrayOf(1, 2, 3)
     var head = byteArrayOf()
     var partialFailure: Throwable? = null
@@ -41,13 +42,14 @@ internal class FakeObjectAccess : ObjectAccess {
     var thumbCode = PtpConstants.Rc.OK
     var thumbReads = 0
     var partialLength = 0L
+    var partialOffset = 0L
     var streamCalls = 0
     var streamAction: (sink: (ByteArray, Int) -> Unit) -> PtpResponse = { sink ->
         sink(byteArrayOf(1, 2, 3), 3); PtpResponse(PtpConstants.Rc.OK)
     }
     override suspend fun handles(parent: Long): PtpData {
         queriedParents += parent
-        return okData(objectHandles(*(children[parent].orEmpty().toLongArray())))
+        return handlesProvider?.invoke(parent) ?: okData(objectHandles(*(children[parent].orEmpty().toLongArray())))
     }
     override suspend fun info(handle: Long): PtpData {
         infoReads += handle
@@ -57,8 +59,9 @@ internal class FakeObjectAccess : ObjectAccess {
         thumbReads++
         return PtpData(PtpResponse(thumbCode), thumbnail)
     }
-    override suspend fun partial(handle: Long, length: Long): PtpData {
+    override suspend fun partial(handle: Long, offset: Long, length: Long): PtpData {
         partialLength = length
+        partialOffset = offset
         partialFailure?.let { throw it }
         return PtpData(PtpResponse(partialCode), head)
     }

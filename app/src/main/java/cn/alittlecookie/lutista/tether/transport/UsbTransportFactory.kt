@@ -17,7 +17,12 @@ class UsbTransportFactory(
         UsbIoThread.requireIoThread("UsbTransportFactory.create")
         if (target !is UsbTarget || !target.permissionGranted) return null
         val connection = hub.openConnection(target.device) ?: return null
-        val raw = PtpUsbTransport(diag = if (logger.enabled) logger else null)
+        // 预检失败到最后一档时允许传输层换一条 usbfs 通道（关 fd 重新 openDevice）：
+        // 这是 Android 上唯一还能重建主机侧端点状态的动作，见 PtpUsbTransport.reopenConnection。
+        val raw = PtpUsbTransport(
+            diag = if (logger.enabled) logger else null,
+            reopenConnection = { hub.openConnection(target.device) },
+        )
         val diagnostics = UsbPtpDiagnostics(raw)
         val traced: PtpTransport = PtpDiagTransport(raw, diagnostics, logger)
         try {

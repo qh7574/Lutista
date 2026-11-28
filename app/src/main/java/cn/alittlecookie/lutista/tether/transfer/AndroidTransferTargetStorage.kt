@@ -8,6 +8,7 @@ import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
 import cn.alittlecookie.lutista.manager.SettingsManager
 import cn.alittlecookie.lutista.tether.objects.CameraObject
+import cn.alittlecookie.lutista.util.SafDirectoryAccess
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
@@ -16,9 +17,6 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.Properties
 
 /** Ordinary directories and persisted SAF trees share the same transactional contract.
@@ -45,14 +43,11 @@ class AndroidTransferTargetStorage(
         val location = location(kind)
         if (!location.startsWith("content://")) return@withContext files.prepare(key, info, kind)
         require(key.matches(Regex("[a-zA-Z0-9_-]+")))
+        val directory = SafDirectoryAccess.writableDirectory(context, location)
         val treeUri = Uri.parse(location.substringBefore('|'))
-        var directory = DocumentFile.fromTreeUri(context, treeUri) ?: throw IOException("Invalid SAF transfer directory")
-        if (!directory.canWrite()) throw IOException("SAF transfer directory is not writable")
-        location.substringAfter('|', "").split('/').filter { it.isNotEmpty() }.forEach { segment ->
-            directory = directory.findFile(segment)?.takeIf { it.isDirectory }
-                ?: directory.createDirectory(segment) ?: throw IOException("Cannot create SAF transfer directory")
-        }
-        val available = availableSafBytes(treeUri) ?: throw IOException("SAF provider does not report available space")
+        // Providers may not publish available bytes; let the actual stream write succeed or fail.
+        // Long.MAX_VALUE is an explicit "unknown" sentinel, not a reported free-space amount.
+        val available = availableSafBytes(treeUri) ?: Long.MAX_VALUE
         FileTransferTargetStorage.checkSpace(info.size, available)
         val sourceDirectory = File(context.filesDir, ".tether-sources/${kind.name}-$key")
         if (!sourceDirectory.isDirectory && !sourceDirectory.mkdirs()) throw IOException("Cannot create original staging directory")
@@ -83,7 +78,7 @@ class AndroidTransferTargetStorage(
                 if (info.format == 0x3801L && !isDecodableJpeg(part)) throw IOException("JPEG is not decodable")
                 if (!part.renameTo(local)) throw IOException("Cannot retain SAF original")
             }
-            override suspend fun commit(): DownloadedTransfer = withContext(Dispatchers.IO) {
+            override suspend fun commit(): DownloadedTransfer = safIo {
                 check(finished)
                 val doc = destination.createFile(mimeType(info), name) ?: throw IOException("Cannot create SAF output")
                 document = doc
@@ -109,7 +104,7 @@ class AndroidTransferTargetStorage(
                 suppression.complete(token, doc.uri.toString(), info.size)
                 DownloadedTransfer(doc.uri.toString(), local.absolutePath, info.size)
             }
-            override suspend fun abort() = withContext(Dispatchers.IO) {
+            override suspend fun abort() = safIo {
                 close()
                 if (!committed) {
                     val doc = document
@@ -123,17 +118,17 @@ class AndroidTransferTargetStorage(
         }
     }
 
-    override suspend fun recover(record: TransferRecord): DownloadedTransfer? = withContext(Dispatchers.IO) {
+    override suspend fun recover(record: TransferRecord): DownloadedTransfer? = safIo {
         val journal = FileTransferTargetStorage.journalFile(stateRoot, record.key, record.kind)
         val properties = FileTransferTargetStorage.readJournal(journal)
-        if (properties?.getProperty("type") != "saf") return@withContext files.recover(record)
+        if (properties?.getProperty("type") != "saf") return@safIo files.recover(record)
         val local = properties.getProperty("local")?.let(::File)
         val uri = properties.getProperty("safUri")?.let(Uri::parse)
         val format = properties.getProperty("format")?.toLongOrNull()
         if (local?.isFile == true && local.length() == record.size && uri != null &&
             documentSize(context, uri) == record.size && (format != 0x3801L || isDecodableJpeg(local))) {
             properties.getProperty("reservation")?.let { suppression.complete(it, uri.toString(), record.size) }
-            return@withContext DownloadedTransfer(uri.toString(), local.absolutePath, record.size)
+            return@safIo DownloadedTransfer(uri.toString(), local.absolutePath, record.size)
         }
         if (uri != null) {
             val doc = DocumentFile.fromSingleUri(context, uri)
@@ -146,16 +141,69 @@ class AndroidTransferTargetStorage(
         null
     }
 
+    override suspend fun release(record: TransferRecord, downloaded: DownloadedTransfer) = safIo {
+        // The SAF document is the user-visible original; only our private staging copy is removed.
+        val sourceDirectory = File(context.filesDir, ".tether-sources/${record.kind.name}-${record.key}")
+        val local = downloaded.localPath?.let(::File)
+        if (local != null && local.isFile &&
+            local.absolutePath.startsWith(sourceDirectory.absolutePath + File.separator)) {
+            local.delete()
+        }
+        sourceDirectory.listFiles()?.forEach { it.delete() }
+        sourceDirectory.delete()
+        FileTransferTargetStorage.journalFile(stateRoot, record.key, record.kind).delete()
+        Unit
+    }
+
+    override suspend fun sweepOrphanedStaging(protectedKeys: Set<String>) = safIo {
+        val sources = File(context.filesDir, ".tether-sources")
+        val journalDirectory = File(stateRoot, ".tether-partials")
+        sources.listFiles()?.filter { it.isDirectory }?.forEach { directory ->
+            if (directory.name in protectedKeys) return@forEach
+            // A journal means the transfer is still recoverable; never discard its staging bytes.
+            if (File(journalDirectory, directory.name + ".properties").isFile) return@forEach
+            directory.listFiles()?.forEach { it.delete() }
+            directory.delete()
+        }
+        // A committed journal proves the SAF destination owns a durable copy. Previous builds
+        // still kept the private staging file forever, so release those once the document size
+        // matches instead of leaving downloaded originals inside filesDir.
+        journalDirectory.listFiles()?.filter { it.isFile && it.name.endsWith(".properties") }?.forEach { journal ->
+            runCatching {
+                if (journal.name.removeSuffix(".properties") in protectedKeys) return@runCatching
+                // Do not race a processing task that may still read the private original.
+                if (System.currentTimeMillis() - journal.lastModified() < STAGING_GRACE_MS) return@runCatching
+                val properties = FileTransferTargetStorage.readJournal(journal) ?: return@runCatching
+                if (properties.getProperty("type") != "saf") return@runCatching
+                if (properties.getProperty("committed") != "true") return@runCatching
+                val local = properties.getProperty("local")?.let(::File) ?: return@runCatching
+                val uri = properties.getProperty("safUri")?.let(Uri::parse) ?: return@runCatching
+                val size = properties.getProperty("size")?.toLongOrNull() ?: return@runCatching
+                if (documentSize(context, uri) != size) return@runCatching
+                local.delete()
+                local.parentFile?.listFiles()?.takeIf { it.isEmpty() }?.let { local.parentFile.delete() }
+                journal.delete()
+            }
+        }
+        Unit
+    }
+
+    private suspend fun <T> safIo(block: suspend () -> T): T = withContext(Dispatchers.IO) {
+        try {
+            block()
+        } catch (failure: SecurityException) {
+            throw SafDirectoryAccess.permissionFailure(failure)
+        }
+    }
+
     private suspend fun location(kind: TransferKind): String {
-        val path = if (kind == TransferKind.AUTO) settings.monitorPath.first() else settings.outputPath.first()
-        val fallback = File(context.getExternalFilesDir(Environment.DIRECTORY_PICTURES) ?: context.filesDir, "LumixTether")
-        if (kind != TransferKind.AUTO) return path.ifBlank { fallback.absolutePath }
-        val date = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date()) // Phone date, not camera clock.
-        return if (path.startsWith("content://")) "$path|LumixTether/$date"
-        else File(File(path.ifBlank { fallback.parentFile!!.absolutePath }, "LumixTether"), date).absolutePath
+        return TransferDestination.resolve(settings.monitorPath.first())
     }
 
     companion object {
+        /** A just-committed staging file may still be the source of a running processing task. */
+        private const val STAGING_GRACE_MS = 10 * 60_000L
+
         private fun isDecodableJpeg(file: File): Boolean {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(file.absolutePath, bounds)

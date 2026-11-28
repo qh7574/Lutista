@@ -112,14 +112,37 @@ class CameraSession(
                 }
                 machine.move(TetherState(TetherPhase.Connecting, message = "正在连接…"))
                 val started = nowMs()
-                val deadline = started + CONNECT_BUDGET_MS
+                var deadline = started + CONNECT_BUDGET_MS
                 val target = found.copy(permissionGranted = true)
                 targetKey = target.cacheKey
+                // 传输层是否判定「相机一个字节都没回」：决定失败时给用户哪条处置建议。
+                // 完全沉默只有关相机电源能救（拔数据线无效，见 CAMERA_SILENT_HINT）。
+                var openSilent = false
                 try {
                     scheduler.start()
                     val opened = scheduler.run {
                         checkConnecting(deadline)
+                        // 传输层自愈（清 halt → 精确排空 → 类请求 Cancel/DeviceReset → 重试预检）
+                        // 是有界的，但它**不属于**「PTP 会话建立」的 5 s 预算：真机
+                        // logs_1795791570292 的 22:57:56 那一次，复位在 455 ms 内成功、
+                        // 重新预检 4 ms 就 OK，结果 open() 返回后立刻被 5 s 预算判死
+                        // （日志 `connect Connected connectionMs=2027` 与
+                        // `Connection exceeded the fixed 5 second budget` 交替出现）。
+                        //
+                        // 只按传输层**自报**的自愈耗时补预算（`Transport.openRecoveryMs`）：
+                        // 干净连接与 fake 传输层都报 0，预算分毫不动，201E 恢复、factory 超预算
+                        // 两条既有契约保持原样；真机上确实做过自愈的那一次才拿回额度。
                         val link = factory.create(target) ?: throw PtpException("USB connection could not be opened")
+                        openSilent = link.cameraSilent
+                        val recoveryMs = link.openRecoveryMs
+                        if (recoveryMs > 0) {
+                            val granted = recoveryMs.coerceAtMost(OPEN_RECOVERY_ALLOWANCE_MS)
+                            deadline += granted
+                            logger.log(
+                                "connect",
+                                "openRecoveryMs=" + recoveryMs + "; budgetExtendedMs=" + granted,
+                            )
+                        }
                         // Publish ownership before checking cancellation: close reads these fields on this worker.
                         transport = link
                         checkConnecting(deadline)
@@ -199,9 +222,14 @@ class CameraSession(
                     throw cancel
                 } catch (failure: Throwable) {
                     if (diagnostics?.isFatal == true) fatalCause.compareAndSet(null, failure)
-                    logger.log("connect", "failure=" + failure.javaClass.simpleName + " message=" + failure.message + " fatal=" + isFatal)
+                    logger.log(
+                        "connect",
+                        "failure=" + failure.javaClass.simpleName + " message=" + failure.message +
+                            " fatal=" + isFatal + " cameraSilent=" + openSilent,
+                    )
                     cleanupAfterFailure(failure, CloseReason.FATAL, true)
-                    machine.move(TetherState(TetherPhase.Fatal, message = "连接失败，请确认 PC(Tether) 模式并拔插 USB 后重试：" + failure.message))
+                    val hint = if (openSilent) CAMERA_SILENT_HINT else CONNECT_FAILURE_HINT
+                    machine.move(TetherState(TetherPhase.Fatal, message = hint + failure.message))
                     ConnectOutcome.Failed(failure)
                 }
             }
@@ -306,8 +334,9 @@ class CameraSession(
     private fun latchFatal(failure: Throwable, failedGeneration: Long, retainActiveResult: Boolean = false) {
         synchronized(admissionLock) {
             if (generation.get() != failedGeneration || closing.get() || !fatalCause.compareAndSet(null, failure)) return
+            // Failure continuations may resume inline; publish Fatal before notifying them.
+            if (state.value.phase != TetherPhase.Fatal) machine.move(TetherState(TetherPhase.Fatal, message = "USB 已中断，请把相机电源关掉再打开（或取出电池重装）后重新连接"))
             scheduler.abortAll(failure, retainActiveResult)
-            if (state.value.phase != TetherPhase.Fatal) machine.move(TetherState(TetherPhase.Fatal, message = "USB 已中断，请拔插后重连"))
         }
         scope.launch {
             lifecycle.withLock {
@@ -459,6 +488,38 @@ class CameraSession(
     }
     companion object {
         const val CONNECT_BUDGET_MS = 5_000L
+
+        /**
+         * 「`transport.open()` 花掉的时间」最多能从连接预算里补回多少毫秒。
+         *
+         * 取值依据 = `PtpUsbTransport.resyncChannel` 自己声明的上界（排空 128×150 ms 但总预算
+         * 1.5 s、控制传输 6×150 ms、DeviceReset ≤2×150 ms、响应 2×150 ms，实测复原在 0.5 s 量级）。
+         * 超过这个额度的耗时说明 open() 本身在异常状态里打转，仍按 5 s 预算判死。
+         */
+        const val OPEN_RECOVERY_ALLOWANCE_MS = 2_100L
+
+        /**
+         * 真机七轮日志（2026-11-27/28）结论：相机的 USB 连接状态只有在**断电**时才复位 ——
+         * 拔数据线（相机仍由电池供电）不一定够；完全沉默时更是必须关电源再打开。
+         * 所以提示先让用户关电源，再提换线/换口。
+         */
+        const val CONNECT_FAILURE_HINT =
+            "连接失败。请先把相机电源关掉再打开（或取出电池重装），等待 2 秒后重新连接——" +
+                "只拔数据线往往清不掉相机内部的连接状态。若仍失败，请确认相机处于 PC(Tether) 模式："
+
+        /**
+         * 相机对每条命令**一个字节都没有回**时的处置建议（传输层 `cameraSilent`）。
+         *
+         * 真机 `logs_1795824713270`（2026-11-28 08:10:54–08:11:49）6 次尝试全部零回包，而
+         * `CLEAR_FEATURE(ENDPOINT_HALT)`、`SET_INTERFACE`、类请求 `DeviceReset(0x66)`、
+         * PTP `DeviceReset(0x1003)` 全部“成功”；拔插数据线之后依旧零回包。这种状态只能靠
+         * 关相机电源再打开清除，所以文案必须与 `CONNECT_FAILURE_HINT` 分开，避免用户白拔线。
+         */
+        const val CAMERA_SILENT_HINT =
+            "相机没有响应：每条命令都没有任何回包（连设备信息都读不到），这通常是相机内部的" +
+                "连接状态卡住了。请把相机电源关掉再打开（或取出电池重装），然后再连接——" +
+                "只拔数据线不会清除这个状态。若仍无响应，请换一根数据线或换一个 USB 口，并确认相机在 PC(Tether) 模式："
+
         private const val EVENT_BACKLOG_LIMIT = 256
         private const val PANASONIC_VENDOR_EXTENSION = 0x1CL
         private val PROBE_OPS = setOf(0x9414, 0x9402, 0x9108, 0x1007)

@@ -8,7 +8,7 @@ import cn.alittlecookie.lutista.tether.protocol.PtpStringReader
 object ObjectInfoParser {
     fun parse(handle: Long, data: ByteArray, quirks: PtpQuirks, seq: Long = 0): CameraObject {
         requireHandle(handle)
-        if (data.size < 38) throw PtpParseException("ObjectInfo fixed fields are truncated")
+        if (data.size < 42) throw PtpParseException("ObjectInfo fixed fields are truncated")
         val strings = quirks.objectInfoFilenameOffsetCandidates.asSequence().mapNotNull { offset ->
             try {
                 val filename = PtpStringReader.read(data, offset)
@@ -23,7 +23,8 @@ object ObjectInfoParser {
         val format = u16(data, 4).toLong()
         return CameraObject(
             handle = handle, storageId = u32(data, 0), format = format,
-            parent = u32(data, 34), size = u32(data, 8), name = strings.first,
+            // ImageBitDepth occupies bytes 34..37; ParentObject follows at byte 38.
+            parent = u32(data, 38), size = u32(data, 8), name = strings.first,
             dateTakenRaw = strings.second, isDir = format == quirks.associationFormat, seq = seq,
         )
     }

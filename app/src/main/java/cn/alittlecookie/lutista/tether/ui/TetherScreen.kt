@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -29,6 +30,7 @@ import cn.alittlecookie.lutista.ui.theme.getAppBarColor
 import cn.alittlecookie.lutista.ui.theme.lutistaBlurEffect
 import cn.alittlecookie.lutista.ui.theme.rememberLutistaBlurBackdrop
 import top.yukonga.miuix.kmp.basic.LinearProgressIndicator
+import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.blur.layerBackdrop
@@ -41,6 +43,18 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  */
 @Composable
 fun TetherScreen(state: TetherUiState, onAction: (TetherUiAction) -> Unit, onBack: () -> Unit) {
+    // The content owns safe-drawing insets; Scaffold supplies the host required by Miuix overlays.
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        containerColor = MiuixTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+    ) { _ ->
+        TetherScreenContent(state, onAction, onBack)
+    }
+}
+
+@Composable
+private fun TetherScreenContent(state: TetherUiState, onAction: (TetherUiAction) -> Unit, onBack: () -> Unit) {
     val backdrop = rememberLutistaBlurBackdrop(state.useBlur)
     val barColor = backdrop.getAppBarColor()
     var pendingExit by rememberSaveable { mutableStateOf<String?>(null) }

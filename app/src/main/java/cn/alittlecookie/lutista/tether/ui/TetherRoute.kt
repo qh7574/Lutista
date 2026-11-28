@@ -1,6 +1,8 @@
 package cn.alittlecookie.lutista.tether.ui
 
-import android.content.Intent
+import cn.alittlecookie.lutista.util.SafDirectoryAccess
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -16,6 +18,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import cn.alittlecookie.lutista.manager.SettingsManager
 import cn.alittlecookie.lutista.tether.repository.TetherRepository
+import cn.alittlecookie.lutista.tether.render.PreviewRenderNotice
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import org.koin.compose.koinInject
@@ -36,13 +39,23 @@ fun TetherRoute(
     var exiting by remember { mutableStateOf(false) }
     val directoryPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
-            try {
-                context.contentResolver.takePersistableUriPermission(
-                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
-                )
-                scope.launch { settings.setOutputPath(uri.toString()) }
-            } catch (failure: SecurityException) {
-                Toast.makeText(context, "无法保留目录写入授权，请重新选择目录", Toast.LENGTH_LONG).show()
+            scope.launch {
+                try {
+                    withContext(Dispatchers.IO) { SafDirectoryAccess.persistReadWrite(context, uri) }
+                    settings.setMonitorPath(uri.toString())
+                } catch (cancel: CancellationException) { throw cancel
+                } catch (failure: Exception) {
+                    Toast.makeText(context, failure.message ?: "无法保留目录写入授权，请重新选择目录", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(repository) {
+        repository.previewNotices.collect { notice ->
+            when (notice) {
+                PreviewRenderNotice.FilterFramesDropped -> Toast.makeText(context,
+                    "实时滤镜预览出现丢帧，滤镜仍保持开启", Toast.LENGTH_LONG).show()
             }
         }
     }

@@ -94,7 +94,9 @@ open class JpegPassthroughRenderer(
     protected open val supportsFilters = false
 
     override fun setFilterEnabled(enabled: Boolean) = synchronized(stateLock) {
-        policy.setEnabled(enabled && supportsFilters)
+        val effective = enabled && supportsFilters
+        if (policy.enabled == effective) return@synchronized
+        policy.setEnabled(effective)
         _stats.value = _stats.value.copy(filterState = FilterState.Off, degradeReason = null)
     }
 
@@ -122,19 +124,20 @@ open class JpegPassthroughRenderer(
                         val action = synchronized(stateLock) {
                             policy.frameAction(effectiveFilter != null, bounds.outWidth, bounds.outHeight)
                         }
+                        var renderingFailed = false
                         val filtered = if (action == PreviewFrameAction.Filter && effectiveFilter != null) {
                             // Grain is deliberately disabled for JPEG preview; watermark is never invoked.
                             try {
                                 filterBitmap(checkNotNull(decoded), effectiveFilter)
                             } catch (e: CancellationException) { throw e
-                            } catch (_: Exception) { null }
+                            } catch (_: Exception) { renderingFailed = true; null }
                         } else null
                         if (filtered != null && filtered !== decoded) {
                             pool.release(checkNotNull(decoded))
                             decoded = filtered
                         }
                         val completedAction = synchronized(stateLock) {
-                            val resultAction = policy.completeFrame(action, filtered != null)
+                            val resultAction = policy.completeFrame(action, filtered != null, renderingFailed)
                             _stats.value = _stats.value.copy(
                                 processedFps = policy.processedFps(),
                                 droppedFrames = _stats.value.droppedFrames + if (resultAction == PreviewFrameAction.Drop) 1 else 0,
@@ -147,8 +150,8 @@ open class JpegPassthroughRenderer(
                             resultAction
                         }
                         currentCoroutineContext().ensureActive()
-                        // Throttling, GPU contention and filter failure retain the last filtered frame.
-                        // Only an explicit passthrough/degraded policy may emit the decoded original.
+                        // Throttling and a busy/null GPU output retain the last filtered frame.
+                        // Only a disabled/missing filter or a real rendering failure emits the original.
                         if (completedAction != PreviewFrameAction.Drop && !closed.get()) {
                             output = RenderedFrame(checkNotNull(decoded), bounds.outWidth, bounds.outHeight,
                                 frame.capturedAtMs, filtered != null, pool::release)

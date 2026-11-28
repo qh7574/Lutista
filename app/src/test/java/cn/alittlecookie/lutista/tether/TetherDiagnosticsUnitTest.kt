@@ -271,7 +271,7 @@ class TetherDiagnosticsUnitTest {
             assertEquals(PtpTimeoutException::class.java.simpleName, result.exceptionType)
             assertTrue(result.exceptionMessage.orEmpty().contains("bulk IN"))
             assertTrue(result.detail.contains("isOpen=true; isFatal=true"))
-            assertTrue(result.detail.contains("followupException=PtpException; followupMessage=传输层已置 fatal（上一次超时/NACK），必须拔插相机后重建连接"))
+            assertTrue(result.detail.contains("followupException=PtpException; followupMessage=传输层已置 fatal（上一次超时/NACK），请把相机电源关掉再打开后重新连接"))
             assertTrue(result.detail.contains("evidenceScope=read_only_1ms_and_fatal_fail_fast"))
             assertTrue(usb.truth.isFatal)
             assertEquals(1, usb.writes.size)

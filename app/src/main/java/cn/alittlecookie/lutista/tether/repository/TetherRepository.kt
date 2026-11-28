@@ -28,6 +28,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import timber.log.Timber
 
 /** Process owner of the formal USB session. Recomposition/rotation never creates a transport. */
 class TetherRepository(
@@ -44,6 +45,8 @@ class TetherRepository(
     private val liveViewLock = Mutex()
     private val mutableUi = MutableStateFlow(TetherUiState())
     val uiState: StateFlow<TetherUiState> = mutableUi.asStateFlow()
+    private val mutablePreviewNotices = MutableSharedFlow<PreviewRenderNotice>(extraBufferCapacity = 1)
+    val previewNotices: SharedFlow<PreviewRenderNotice> = mutablePreviewNotices.asSharedFlow()
     val enabled: StateFlow<Boolean> = settings.tetherEnabled
     private var enableJob: Job? = null
     private val serviceLease = ForegroundServiceLease()
@@ -55,6 +58,8 @@ class TetherRepository(
     private var sessionJob: Job? = null
     private var listingJob: Job? = null
     private var galleryJob: Job? = null
+    private var reconciliationJob: Job? = null
+    private var autoReconciler: AutoTransferReconciler? = null
     private var controllerJobs = mutableListOf<Job>()
     private var liveJobs = mutableListOf<Job>()
     private var source: CameraObjectSource? = null
@@ -67,11 +72,11 @@ class TetherRepository(
     private var visibleEntities = emptyList<CameraObjectEntity>()
     private var previewEntity: CameraObjectEntity? = null
     private var currentFilter: FilterConfig? = null
-    private var previewFilterDegraded = false
-    private var previewDegradeReason: DegradeReason? = null
+    private var previewRenderingFailed = false
     private var originalStyle: Long? = null
     private val mediaProgress = mutableMapOf<Long, TetherTransferItemUi>()
     private val originalPaths = mutableMapOf<Long, String>()
+    private val localOriginalPaths = mutableMapOf<Long, String>()
     private data class QueuedObjectEvent(
         val registration: SessionEventBarrier.Registration<PtpUsbDriver, CameraObjectSource>,
         val event: EventPump.ObjectAdded,
@@ -130,10 +135,13 @@ class TetherRepository(
                 })) }
         } }
         scope.launch { settings.useBlur.collect { value -> update { it.copy(useBlur = value) } } }
-        scope.launch { settings.outputPath.collect { path -> update { it.copy(gallery = it.gallery.copy(destination = path.ifBlank { "Pictures/Lutista" })) } } }
+        scope.launch { settings.monitorPath.collect { path ->
+            update { it.copy(gallery = it.gallery.copy(destination = path.ifBlank { "请先在主页设置监控文件夹" }),
+                liveView = it.liveView.copy(autoDownloadDestination = path)) }
+        } }
         scope.launch { settings.tetherAutoTransfer.collect { value -> updateLive { it.copy(autoDownload = value) } } }
         scope.launch { settings.tetherLiveViewFilterEnabled.distinctUntilChanged().collect { value ->
-            val effective = value && !previewFilterDegraded
+            val effective = value && !previewRenderingFailed
             pipeline?.setFilterEnabled(effective)
             updateLive { it.copy(filterEnabled = effective) }
         } }
@@ -143,8 +151,10 @@ class TetherRepository(
             updateLive { it.copy(filterAvailable = filter != null, globalFilterName = filter?.name,
                 filterUnavailableReason = if (filter == null) "请先选择有效的全局滤镜" else null) }
         } }
-        scope.launch { combine(transfers.transfers, transfers.progress) { items, progress -> items.values.toList() to progress }
-            .collect { (items, progress) -> applyTransferProgress(items, progress) } }
+        scope.launch { combine(transfers.transfers, transfers.progress, transfers.batches) { items, progress, batches ->
+            Triple(items.values.toList(), progress, batches)
+        }.collect { (items, progress, batches) -> applyTransferProgress(items, progress, batches) }
+        }
     }
 
     fun requestEnable() {
@@ -282,12 +292,14 @@ class TetherRepository(
                     val key = CameraSessionKey(device.serialNumber.ifBlank { "${device.manufacturer}:${device.model}" }, System.currentTimeMillis())
                     val current = PtpObjectSource(driver.session, profile.quirks, key, driver.gallerySeed?.gallerySeed)
                     transfers.startSession(current)
+                    runCatching { transfers.sweepOrphanedStaging() }
                     currentCoroutineContext().ensureActive()
                     check(eventBarrier.isCurrent(window)) { "相机会话已更换" }
                     activeDriver = driver
                     source = current
+                    autoReconciler = AutoTransferReconciler(key)
                     driver.bindObjectSource(current)
-                    mediaProgress.clear(); originalPaths.clear(); originalStyle = null
+                    mediaProgress.clear(); originalPaths.clear(); localOriginalPaths.clear(); originalStyle = null
                     check(eventBarrier.publish(window, driver, current)) { "相机会话已关闭" }
                     settings.setTetherLastCameraModel(device.model)
                     update { it.copy(cameraName = device.model, cameraDetails = "${device.manufacturer} · ${device.deviceVersion}",
@@ -297,6 +309,7 @@ class TetherRepository(
                     observeGallery(current)
                     bindControllers(driver)
                     enumerate(current)
+                    startAutoReconciliation(current, driver)
                 } catch (timeout: TimeoutCancellationException) {
                     closeSessionLocked(CloseReason.USER, finishRecording = false)
                     showError("相机初始化超时", timeout)
@@ -329,12 +342,12 @@ class TetherRepository(
         }
     }
 
-    private fun enumerate(current: CameraObjectSource) {
+    private fun enumerate(current: CameraObjectSource, background: Boolean = false) {
         if (listingJob?.isActive == true || source !== current || closing) return
         val window = eventBarrier.current() ?: return
         listingJob = scope.launch {
             val baseline = mutableListOf<CameraObject>()
-            updateGallery { it.copy(enumerating = true, enumeratedCount = 0, error = null) }
+            if (!background) updateGallery { it.copy(enumerating = true, enumeratedCount = 0, error = null, directoryWarning = null) }
             try {
                 current.listTree().collect { page -> when (page) {
                     is ObjectPage.Batch -> {
@@ -344,20 +357,47 @@ class TetherRepository(
                         ensureActive()
                         if (source !== current || !eventBarrier.isCurrent(window)) return@collect
                         baseline += page.items
-                        updateGallery { it.copy(enumeratedCount = baseline.count { item -> !item.isDir }) }
+                        if (!background) updateGallery { it.copy(enumeratedCount = baseline.count { item -> !item.isDir }) }
                     }
                     is ObjectPage.Complete -> {
                         if (source !== current || !eventBarrier.isCurrent(window)) return@collect
+                        // Admit new JPEGs before the baseline pass records them as pre-existing,
+                        // otherwise the AUTO admission would be rejected by its own BASELINE row.
+                        autoReconciler?.reconcile(baseline, page.unavailableDirectories,
+                            settings.tetherAutoTransfer.first()) { added ->
+                            if (source !== current || !eventBarrier.isCurrent(window)) throw CancellationException("Stale reconciliation")
+                            transfers.onObjectAdded(current.sessionKey, added.handle)
+                            Timber.i("New JPEG admitted by directory reconciliation; handle=0x${added.handle.toString(16)}")
+                        }
                         transfers.completeBaseline(current.sessionKey, baseline, window.observedHandles)
                         ensureActive()
                         if (source === current && eventBarrier.isCurrent(window)) {
-                            updateGallery { it.copy(enumerating = false, totalCount = page.total) }
+                            val skipped = page.unavailableDirectories
+                            val warning = skipped.takeIf { it.isNotEmpty() }?.let {
+                                val names = it.map { entry -> entry.directory.name }.distinct().take(3).joinToString("、")
+                                "相机未允许读取 ${it.size} 个目录（$names），已继续加载其他目录。"
+                            }
+                            updateGallery { it.copy(enumerating = false, totalCount = page.total, directoryWarning = warning) }
                         }
                     }
                 } }
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Throwable) { updateGallery { it.copy(enumerating = false, error = failure.message ?: "相册读取失败") } }
             finally { baseline.clear() }
+        }
+    }
+
+    /** C108 remains primary; serialized complete snapshots compensate for a camera omitting it. */
+    private fun startAutoReconciliation(current: CameraObjectSource, driver: PtpUsbDriver) {
+        reconciliationJob?.cancel()
+        reconciliationJob = scope.launch {
+            while (isActive && source === current && !driver.session.isFatal) {
+                listingJob?.join()
+                delay(5_000)
+                if (source !== current || closing || driver.session.isFatal) break
+                if (transfers.progress.value.queued > 0 || uiState.value.liveView.isRecording) continue
+                enumerate(current, background = true)
+            }
         }
     }
 
@@ -437,18 +477,28 @@ class TetherRepository(
             is TetherUiAction.SetPhotoStyle -> launchAction { writeProperty(CameraProperty.PHOTO_STYLE, action.value) }
             TetherUiAction.RestorePhotoStyle -> launchAction { reportWrite(activeDriver?.config?.restorePhotoStyle()) }
             is TetherUiAction.SetLiveViewFormat -> launchAction { liveViewLock.withLock {
-                activeDriver?.liveView?.setFormat(action.index) ?: error("实时取景不可用")
-                settings.setTetherLiveViewFormatIndex(action.index)
-                updateLive { it.copy(selectedFormatIndex = action.index) }
+                uiState.value.liveViewFormatUnavailableReason()?.let { error(it) }
+                val camera = activeDriver?.liveView ?: error("实时取景不可用")
+                val applied = camera.setFormat(action.index)
+                val actualIndex = camera.formats.value.indexOf(applied)
+                check(actualIndex >= 0) { "相机未返回实际使用的预览分辨率" }
+                settings.setTetherLiveViewFormatIndex(actualIndex)
+                updateLive { it.copy(selectedFormatIndex = actualIndex) }
             } }
-            is TetherUiAction.SetTargetFps -> launchAction { require(action.fps in setOf(10, 15, 30)); settings.setTetherLiveViewFilterFps(action.fps) }
+            is TetherUiAction.SetTargetFps -> launchAction { require(action.fps > 0); settings.setTetherLiveViewFilterFps(action.fps) }
             is TetherUiAction.SetPreviewFilter -> launchAction {
-                if (action.enabled) { previewFilterDegraded = false; previewDegradeReason = null }
-                pipeline?.setFilterEnabled(action.enabled) // Only this explicit action clears a downgrade.
+                if (action.enabled && previewRenderingFailed) pipeline?.setFilterEnabled(false)
+                previewRenderingFailed = false
+                pipeline?.setFilterEnabled(action.enabled)
                 updateLive { it.copy(filterEnabled = action.enabled) }
                 settings.setTetherLiveViewFilterEnabled(action.enabled)
             }
-            is TetherUiAction.SetAutoDownload -> launchAction { settings.setTetherAutoTransfer(action.enabled) }
+            is TetherUiAction.SetAutoDownload -> launchAction {
+                if (action.enabled) check(settings.monitorPath.first().isNotBlank()) {
+                    "请先在主页面设置监控文件夹，再接收相机照片"
+                }
+                settings.setTetherAutoTransfer(action.enabled)
+            }
             TetherUiAction.Capture, TetherUiAction.ToggleRecording -> launchAction { pressCapture() }
             is TetherUiAction.PlayVideo -> launchAction { showPreview(action.handle); loadVideo(action.handle) }
             TetherUiAction.ToggleVideoPlayback -> update { it.copy(preview = it.preview.copy(videoPlaying = !it.preview.videoPlaying)) }
@@ -470,28 +520,31 @@ class TetherRepository(
             val renderer = LatestLiveViewRenderer(scope, VulkanLiveViewRenderer(engine))
             pipeline = renderer
             renderer.setTargetFps(settings.tetherLiveViewFilterFps.first())
-            renderer.setFilterEnabled(settings.tetherLiveViewFilterEnabled.first() && !previewFilterDegraded)
+            renderer.setFilterEnabled(settings.tetherLiveViewFilterEnabled.first() && !previewRenderingFailed)
+            liveJobs += scope.launch { renderer.notices.collect { notice -> mutablePreviewNotices.emit(notice) } }
             liveJobs += scope.launch { renderer.frames.collect { frame -> liveImage.offer(frame) } }
             liveJobs += scope.launch { renderer.stats.collect { stats ->
-                if (stats.filterState == FilterState.Degraded) {
-                    previewFilterDegraded = true
-                    previewDegradeReason = stats.degradeReason
-                }
+                if (stats.degradeReason == DegradeReason.RenderingFailure) previewRenderingFailed = true
                 updateLive { it.copy(processedFps = stats.processedFps,
-                receivedFps = stats.presentedFps, frozen = false,
-                filterEnabled = if (previewFilterDegraded) false else it.filterEnabled,
-                filterUnavailableReason = when (stats.degradeReason ?: previewDegradeReason) {
-                    DegradeReason.LowProcessedFps -> "处理帧率持续偏低，已关闭预览滤镜，可手动重新开启"
-                    DegradeReason.UnsupportedResolution -> "当前分辨率不支持滤镜，已使用原始取景"
-                    null -> if (currentFilter == null) "请先选择有效的全局滤镜" else null
-                }) } } }
-            liveJobs += scope.launch { camera.frames.collect { frame -> renderer.submit(frame, currentFilter) } }
-            liveJobs += scope.launch { camera.state.collect { state -> updateLive { it.copy(
-                running = state.phase == LiveViewPhase.Running, starting = state.phase == LiveViewPhase.Starting,
-                switchingFormat = state.phase == LiveViewPhase.Switching, frozen = state.phase == LiveViewPhase.Failed,
-                error = state.detail) } } }
-            liveJobs += scope.launch { camera.formats.collect { formats -> updateLive { it.copy(formats = formats.mapIndexed { index, value ->
-                TetherLiveViewFormatUi(index, "档位 ${index + 1}", "${value.width} × ${value.height}", if (value.width > 1920 || value.height > 1920) "高分辨率直通" else "") }) } } }
+                    receivedFps = stats.presentedFps, frozen = false,
+                    filterEnabled = if (previewRenderingFailed) false else it.filterEnabled,
+                    filterUnavailableReason = when {
+                        previewRenderingFailed -> "预览滤镜渲染失败，可手动重新开启"
+                        currentFilter == null -> "请先选择有效的全局滤镜"
+                        else -> null
+                    }) } } }
+            liveJobs += scope.launch { camera.latestFrame.collect { frame ->
+                updateLive { it.copy(receivedDimensions = frame?.let { value -> "${value.width} × ${value.height}" }) }
+                if (frame != null) renderer.submit(frame, currentFilter)
+            } }
+            liveJobs += scope.launch { combine(camera.state, camera.formats) { state, formats -> state to formats }
+                .collect { (state, formats) -> updateLive { it.copy(
+                    running = state.phase == LiveViewPhase.Running, starting = state.phase == LiveViewPhase.Starting,
+                    switchingFormat = state.phase == LiveViewPhase.Switching, frozen = state.phase == LiveViewPhase.Failed,
+                    selectedFormatIndex = if (state.phase == LiveViewPhase.Running) formats.indexOf(state.format) else it.selectedFormatIndex,
+                    formats = formats.mapIndexed { index, value ->
+                        TetherLiveViewFormatUi(index, "档位 ${index + 1}", "${value.width} × ${value.height}") },
+                    error = state.detail) } } }
         }
         updateLive { it.copy(image = TetherImage(source = liveImage)) }
         try {
@@ -529,7 +582,8 @@ class TetherRepository(
             finally {
                 pipeline = null
                 liveImage.close()
-                updateLive { it.copy(running = false, starting = false, image = TetherImage(), switchingFormat = false) }
+                updateLive { it.copy(running = false, starting = false, image = TetherImage(), switchingFormat = false,
+                    selectedFormatIndex = -1, receivedDimensions = null) }
             }
         }
     }
@@ -537,9 +591,21 @@ class TetherRepository(
     private suspend fun pressCapture() {
         check(!closing && enabled.value && uiState.value.page == TetherPage.LiveView) { "请先进入实时取景" }
         when (val result = (activeDriver?.capture ?: error("此相机未确认快门控制")).press()) {
-            is PressResult.Accepted -> Unit
+            is PressResult.Accepted -> schedulePostCaptureRefresh()
             is PressResult.Ignored -> error(result.reason)
             is PressResult.Rejected -> error("相机拒绝快门：0x${result.responseCode.toString(16)}")
+        }
+    }
+
+    /**
+     * C108 is not reliable on every body, so an event-only design can miss the shot entirely.
+     * Re-enumerate shortly after the shutter instead of waiting for the next 5s poll.
+     */
+    private fun schedulePostCaptureRefresh() {
+        val current = source ?: return
+        scope.launch {
+            delay(1_500)
+            if (source === current && !closing) enumerate(current, background = true)
         }
     }
 
@@ -613,21 +679,42 @@ class TetherRepository(
             originalPhotoStyle = originalStyle, photoStyleValues = style?.descriptor?.values.orEmpty())
     }
 
-    private fun applyTransferProgress(items: List<TransferProgress>, progress: TransferProgress) {
+    private fun applyTransferProgress(
+        items: List<TransferProgress>,
+        progress: TransferProgress,
+        batches: Map<Long, TransferBatchProgress>,
+    ) {
         val key = source?.sessionKey ?: return
         val current = items.filter { it.sessionKey == key && it.handle != null }
         for ((handle, states) in current.groupBy { requireNotNull(it.handle) }) {
-            val item = states.lastOrNull { !it.targetPath.isNullOrBlank() } ?: states.last()
+            // A running entry publishes its destination hint before the copy exists; only a committed
+            // state has a path that can be played back or reported as downloaded.
+            val committed = states.lastOrNull { it.state in committedTransferStates }
+            val item = committed ?: states.last()
             val fraction = if (item.totalBytes > 0) (item.bytesDone.toDouble() / item.totalBytes).toFloat().coerceIn(0f, 1f) else 0f
-            mediaProgress[handle] = TetherTransferItemUi(handle, item.name, fraction,
-                !item.targetPath.isNullOrBlank(), item.error)
-            item.targetPath?.takeIf(String::isNotBlank)?.let { originalPaths[handle] = it }
+            mediaProgress[handle] = TetherTransferItemUi(handle, item.name, fraction, committed != null, item.error)
+            committed?.targetPath?.takeIf(String::isNotBlank)?.let { originalPaths[handle] = it }
         }
+        val batch = selectedBatch(batches)
         update { it.copy(transfer = TetherTransferUi(
-            active = current.any { item -> item.state in setOf(TransferState.RUNNING, TransferState.PENDING, TransferState.SUBMITTING) },
-            items = mediaProgress.values.toList(), completedCount = mediaProgress.values.count { item -> item.completed },
-            totalCount = mediaProgress.size, bytesWritten = progress.bytesDone, totalBytes = progress.totalBytes, error = progress.error),
+            active = batch?.active ?: current.any { item -> item.state in setOf(TransferState.RUNNING, TransferState.PENDING, TransferState.SUBMITTING) },
+            items = mediaProgress.values.toList(),
+            // The user selected a batch; its own counters answer "current / total". Aggregating every
+            // handle this session has ever seen made the denominator grow by one with each item.
+            completedCount = batch?.currentIndex ?: mediaProgress.values.count { item -> item.completed },
+            totalCount = batch?.totalCount ?: mediaProgress.size,
+            bytesWritten = batch?.bytesDone ?: progress.bytesDone,
+            totalBytes = batch?.totalBytes ?: progress.totalBytes,
+            error = progress.error),
             gallery = it.gallery.copy(items = visibleEntities.map(::media))) }
+    }
+
+    /** Prefer the newest still-running batch; after it settles keep its final counters visible. */
+    private fun selectedBatch(batches: Map<Long, TransferBatchProgress>): TransferBatchProgress? {
+        val key = source?.sessionKey ?: return null
+        val session = batches.values.filter { it.sessionKey == key }
+        if (session.isEmpty()) return null
+        return session.filter { it.active }.maxByOrNull { it.id } ?: session.maxByOrNull { it.id }
     }
 
     /** Caller holds lifecycle. None of the release stages can skip a later release. */
@@ -659,6 +746,7 @@ class TetherRepository(
                     jobs.forEach(Job::cancel)
                     jobs.joinAll()
                 },
+                TetherCleanupStep("停止回传目录核对") { reconciliationJob?.cancelAndJoin(); reconciliationJob = null },
                 TetherCleanupStep("停止相册枚举") { listingJob?.cancelAndJoin(); listingJob = null },
                 TetherCleanupStep("停止相册观察") { galleryJob?.cancelAndJoin(); galleryJob = null },
                 TetherCleanupStep("停止控制器观察") {
@@ -703,7 +791,8 @@ class TetherRepository(
 
     private suspend fun clearSession(old: CameraObjectSource?) {
         visibleEntities = emptyList(); previewEntity = null
-        mediaProgress.clear(); originalPaths.clear(); originalStyle = null
+        mediaProgress.clear(); originalPaths.clear(); localOriginalPaths.clear(); originalStyle = null
+        autoReconciler = null
         pageLimit.value = 100
         galleryFilter.value = null to null
         update { it.copy(gallery = it.gallery.copy(items = emptyList(), enumerating = false, selectedHandles = emptySet()),

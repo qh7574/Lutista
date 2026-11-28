@@ -2,6 +2,10 @@ package cn.alittlecookie.lutista.ui.screen
 
 import android.Manifest
 import android.content.Intent
+import cn.alittlecookie.lutista.util.SafDirectoryAccess
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -327,10 +331,15 @@ private fun MainScreenContent(openTetherRequestId: Long = 0L) {
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         uri?.let {
-            context.contentResolver.takePersistableUriPermission(
-                it, Intent.FLAG_GRANT_READ_URI_PERMISSION
-            )
-            scope.launch { settingsManager.setMonitorPath(it.toString()) }
+            scope.launch {
+                try {
+                    withContext(Dispatchers.IO) { SafDirectoryAccess.persistReadWrite(context, it) }
+                    settingsManager.setMonitorPath(it.toString())
+                } catch (cancel: CancellationException) { throw cancel
+                } catch (failure: Exception) {
+                    Toast.makeText(context, failure.message ?: "无法保留监控目录的读写授权，请重新选择可写目录", Toast.LENGTH_LONG).show()
+                }
+            }
         }
     }
 
@@ -338,10 +347,15 @@ private fun MainScreenContent(openTetherRequestId: Long = 0L) {
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         uri?.let {
-            context.contentResolver.takePersistableUriPermission(
-                it, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
-            scope.launch { settingsManager.setOutputPath(it.toString()) }
+            scope.launch {
+                try {
+                    withContext(Dispatchers.IO) { SafDirectoryAccess.persistReadWrite(context, it) }
+                    settingsManager.setOutputPath(it.toString())
+                } catch (cancel: CancellationException) { throw cancel
+                } catch (failure: Exception) {
+                    Toast.makeText(context, failure.message ?: "无法保留输出目录的读写授权，请重新选择可写目录", Toast.LENGTH_LONG).show()
+                }
+            }
         }
     }
 

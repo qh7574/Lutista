@@ -45,6 +45,8 @@ class ImageProcessingService(
     ) = withContext(Dispatchers.IO) {
         val sourcePath = task.sourcePath
         val isCacheFile = sourcePath.startsWith(context.cacheDir.absolutePath)
+        val stagingRoot = File(context.filesDir, ".tether-sources").absolutePath
+        val isStagingFile = sourcePath.startsWith(stagingRoot + File.separator)
         var inputBitmap: Bitmap? = null
         var outputBitmap: Bitmap? = null
         var outputReservation: String? = null
@@ -175,8 +177,16 @@ class ImageProcessingService(
             }
             outputBitmap?.recycle()
 
-            if (isCacheFile) {
-                try { File(sourcePath).delete() } catch (_: Exception) {}
+            if (isCacheFile || (isStagingFile && outputCommitted)) {
+                try {
+                    val source = File(sourcePath)
+                    source.delete()
+                    // The committed destination now owns the only copy; drop the empty staging folder.
+                    val parent = source.parentFile
+                    if (isStagingFile && parent != null) {
+                        parent.listFiles()?.takeIf { it.isEmpty() }?.let { parent.delete() }
+                    }
+                } catch (_: Exception) {}
             }
         }
     }

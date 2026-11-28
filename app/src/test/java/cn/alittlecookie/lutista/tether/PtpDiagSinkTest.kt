@@ -431,7 +431,7 @@ class PtpDiagSinkTest {
             harness.transport.transaction(PtpOp(PtpConstants.Op.GET_DEVICE_INFO))
             fail("fatal必须fail-fast")
         } catch (expected: cn.alittlecookie.lutista.tether.transport.PtpException) {
-            assertEquals("传输层已置 fatal（上一次超时/NACK），必须拔插相机后重建连接", expected.message)
+            assertEquals("传输层已置 fatal（上一次超时/NACK），请把相机电源关掉再打开后重新连接", expected.message)
         }
         assertEquals(reads, camera.inRequests.size)
         assertEquals(writes, camera.outRequests.size)

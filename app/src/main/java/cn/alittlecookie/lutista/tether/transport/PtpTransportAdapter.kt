@@ -5,6 +5,9 @@ class PtpTransportAdapter(
     private val delegate: PtpTransport,
     val diagnostics: PtpDiagnostics,
 ) : Transport {
+    override val openRecoveryMs: Long get() = delegate.openRecoveryMs
+    override val cameraSilent: Boolean get() = delegate.cameraSilent
+
     override suspend fun transaction(
         op: PtpOp,
         expectedData: Boolean,

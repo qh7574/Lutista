@@ -28,6 +28,19 @@ class PtpDiagTransport internal constructor(
     constructor(delegate: PtpTransport, diagnostics: PtpDiagnostics, logger: TetherDiagLogger) :
         this(delegate, diagnostics, logger, { SystemClock.elapsedRealtime() })
 
+    /**
+     * 纯转发：诊断包装层不得改变传输层自报的恢复状态。
+     *
+     * 真机 logs_1795826645352（2026-11-28 08:43）里传输层已经判定 `cameraSilent`，
+     * 会话层日志却是 `connect failure=… cameraSilent=false` —— 因为这一层没有转发，
+     * `Transport` 的默认 `false` 把上层的判定吞掉了：用户看到的是「拔数据线」而不是
+     * 「关相机电源」，`openRecoveryMs` 的连接预算退款同样一直拿到 0。
+     */
+    override val openRecoveryMs: Long get() = delegate.openRecoveryMs
+
+    /** 见 [openRecoveryMs]：静默判定必须原样穿过包装层。 */
+    override val cameraSilent: Boolean get() = delegate.cameraSilent
+
     private val unknownEventCount = AtomicInteger()
     private val noiseEventCount = AtomicInteger()
 

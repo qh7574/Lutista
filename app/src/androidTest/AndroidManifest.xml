@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Components belong to the separate test APK UID, never the production app. -->
+        <provider
+            android:name="cn.alittlecookie.lutista.tether.transfer.SafRegressionDocumentsProvider"
+            android:authorities="cn.alittlecookie.lutista.test.saf-regression"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS"
+            android:process=":safProvider">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
+        <activity
+            android:name="cn.alittlecookie.lutista.tether.transfer.SafGrantActivity"
+            android:exported="true"
+            android:process=":safProvider"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+    </application>
+</manifest>

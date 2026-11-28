@@ -6,17 +6,22 @@ import org.junit.Test
 class PreviewRenderPolicyTest {
     private class Clock(var ms: Long = 0) : PreviewClock { override fun nowMs() = ms }
 
-    @Test fun `default is off at fifteen and only supported rates are accepted`() {
+    @Test fun `default is off and every positive target rate is accepted`() {
         val policy = PreviewRenderPolicy(Clock())
         assertFalse(policy.enabled)
         assertEquals(15, policy.targetFps)
         assertFalse(policy.shouldProcess(true, 640, 432))
-        for (rate in listOf(10, 15, 30)) { policy.setTargetFps(rate); assertEquals(rate, policy.targetFps) }
-        try { policy.setTargetFps(20); fail("unsupported rate") } catch (_: IllegalArgumentException) { }
+        for (rate in listOf(1, 10, 15, 20, 24, 30, 60, 120, 240)) {
+            policy.setTargetFps(rate)
+            assertEquals(rate, policy.targetFps)
+        }
+        for (rate in listOf(0, -1)) {
+            try { policy.setTargetFps(rate); fail("nonpositive rate") } catch (_: IllegalArgumentException) { }
+        }
     }
 
-    @Test fun `throttle uses elapsed monotonic time at every rate`() {
-        for (rate in listOf(10, 15, 30)) {
+    @Test fun `throttle uses elapsed monotonic time without restricting filter availability`() {
+        for (rate in listOf(10, 15, 20, 30, 60, 120, 240)) {
             val clock = Clock()
             val policy = PreviewRenderPolicy(clock)
             policy.setTargetFps(rate)
@@ -24,15 +29,17 @@ class PreviewRenderPolicyTest {
             var count = 0
             for (time in 0L until 1_000L) {
                 clock.ms = time
-                if (policy.shouldProcess(true, 640, 432)) { count++; policy.onProcessed() }
+                if (policy.shouldProcess(true, 6000, 4000)) { count++; policy.onProcessed() }
             }
             assertTrue("rate=$rate count=$count", count <= rate)
             assertTrue("rate=$rate count=$count", count >= rate - 1)
+            assertEquals(FilterState.On, policy.state(true))
+            assertNull(policy.degradeReason)
         }
     }
 
-    @Test fun `rounded camera timestamps retain target cadence without false degradation`() {
-        for (rate in listOf(10, 15, 30)) {
+    @Test fun `rounded high FPS camera timestamps retain cadence without disabling high resolution filter`() {
+        for (rate in listOf(10, 15, 30, 60, 120, 240)) {
             val clock = Clock(2_000_000)
             val policy = PreviewRenderPolicy(clock)
             policy.setTargetFps(rate)
@@ -40,155 +47,156 @@ class PreviewRenderPolicyTest {
             var count = 0
             for (frameIndex in 0 until rate * 5) {
                 clock.ms = 2_000_000 + frameIndex * 1_000L / rate
-                if (policy.shouldProcess(true, 640, 432)) { count++; policy.onProcessed() }
+                if (policy.shouldProcess(true, 6000, 4000)) { count++; policy.onProcessed() }
             }
             assertEquals("rate=$rate", rate * 5, count)
             assertNull(policy.degradeReason)
-            // A pause does not accumulate permission for a burst at the same timestamp.
             clock.ms += 500
-            assertTrue(policy.shouldProcess(true, 640, 432))
-            assertFalse(policy.shouldProcess(true, 640, 432))
+            assertTrue(policy.shouldProcess(true, 6000, 4000))
+            assertFalse(policy.shouldProcess(true, 6000, 4000))
         }
     }
 
-    @Test fun `three seconds below eighty percent degrades at eight twelve twenty four`() {
-        for ((rate, minimum) in listOf(10 to 8, 15 to 12, 30 to 24)) {
-            for (successesPerSecond in listOf(minimum - 1, minimum)) {
-                val clock = Clock()
-                val policy = PreviewRenderPolicy(clock)
-                policy.setTargetFps(rate)
-                policy.setEnabled(true)
-                for (time in 0L..4_000L step 10L) {
-                    clock.ms = time
-                    policy.shouldProcess(true, 640, 432)
-                    if (time > 0 && time * successesPerSecond / 1_000 !=
-                        (time - 10) * successesPerSecond / 1_000
-                    ) policy.onProcessed()
-                    policy.evaluate()
-                }
-                assertEquals("target=$rate actual=$successesPerSecond",
-                    if (successesPerSecond < minimum) DegradeReason.LowProcessedFps else null,
-                    policy.degradeReason)
+    @Test fun `all source resolutions remain filtered across format changes`() {
+        val clock = Clock()
+        val policy = PreviewRenderPolicy(clock)
+        policy.setEnabled(true)
+        for ((width, height) in listOf(640 to 432, 1120 to 752, 1600 to 1072, 3840 to 2160, 6000 to 4000)) {
+            clock.ms += 1_000
+            val action = policy.frameAction(true, width, height)
+            assertEquals("${width}x$height", PreviewFrameAction.Filter, action)
+            assertEquals(PreviewFrameAction.Filter, policy.completeFrame(action, true))
+            assertEquals(FilterState.On, policy.state(true))
+            assertNull(policy.degradeReason)
+        }
+    }
+
+    @Test fun `sustained near-zero processed FPS never disables or emits an original`() {
+        for (rate in listOf(15, 60, 120, 240)) {
+            val clock = Clock()
+            val policy = PreviewRenderPolicy(clock)
+            policy.setEnabled(true)
+            policy.setTargetFps(rate)
+            var successful = 0
+            for (frame in 0 until 240 * 60) {
+                clock.ms = frame * 1_000L / 240
+                val action = policy.frameAction(true, 6000, 4000)
+                // Only two completed GPU frames per second; the rest are rate-capped or GPU busy.
+                val output = action == PreviewFrameAction.Filter && frame % 120 == 0
+                val result = policy.completeFrame(action, output)
+                assertNotEquals(PreviewFrameAction.Passthrough, result)
+                if (result == PreviewFrameAction.Filter) successful++
+                policy.evaluate()
+                assertEquals("rate=$rate at ${clock.ms}ms", FilterState.On, policy.state(true))
+                assertNull(policy.degradeReason)
             }
+            assertTrue(successful > 0)
+            assertTrue(policy.processedFps() < rate * 0.8f)
+            clock.ms += 60_000
+            policy.evaluate()
+            assertEquals(FilterState.On, policy.state(true))
+            assertEquals(PreviewFrameAction.Filter, policy.frameAction(true, 6000, 4000))
         }
     }
 
-    @Test fun `slow path is not disabled before three seconds and recovery is explicit`() {
+    @Test fun `busy GPU output remains a dropped filtered frame for a full minute`() {
         val clock = Clock()
         val policy = PreviewRenderPolicy(clock)
         policy.setEnabled(true)
-        assertTrue(policy.shouldProcess(true, 640, 432))
-        clock.ms = 2_999
-        policy.evaluate()
-        assertNull(policy.degradeReason)
-        clock.ms = 3_000
-        policy.evaluate()
-        assertEquals(DegradeReason.LowProcessedFps, policy.degradeReason)
-        policy.setTargetFps(10)
-        assertFalse(policy.shouldProcess(true, 640, 432))
-        assertFalse(policy.shouldProcess(false, 640, 432))
-        clock.ms = 9_000
-        assertFalse(policy.shouldProcess(true, 640, 432))
-        policy.setEnabled(true)
-        assertTrue(policy.shouldProcess(true, 640, 432))
-        assertNull(policy.degradeReason)
+        policy.setTargetFps(120)
+        for (frame in 0 until 240 * 60) {
+            clock.ms = frame * 1_000L / 240
+            val action = policy.frameAction(true, 6000, 4000)
+            assertEquals(PreviewFrameAction.Drop, policy.completeFrame(action, false))
+            assertEquals(FilterState.On, policy.state(true))
+            assertNull(policy.degradeReason)
+        }
+        assertEquals(0f, policy.processedFps(), 0f)
     }
 
-    @Test fun `no filter never starts low FPS timer and large JPEG falls back immediately`() {
-        val clock = Clock()
-        val policy = PreviewRenderPolicy(clock)
-        policy.setEnabled(true)
-        assertFalse(policy.shouldProcess(false, 640, 432))
-        clock.ms = 60_000
-        policy.evaluate()
-        assertNull(policy.degradeReason)
-        assertTrue(policy.shouldProcess(true, 640, 432))
-        assertFalse(policy.shouldProcess(true, 1120, 752))
-        assertEquals(DegradeReason.UnsupportedResolution, policy.degradeReason)
-    }
-
-    @Test fun `rate-capped filtered stream drops frames without emitting alternating originals`() {
-        for (rate in listOf(10, 15, 30)) {
+    @Test fun `rate-capped filtered stream never flashes an original`() {
+        for (rate in listOf(10, 15, 30, 60, 120)) {
             val clock = Clock()
             val policy = PreviewRenderPolicy(clock)
             policy.setTargetFps(rate)
             policy.setEnabled(true)
             var filtered = 0
             var dropped = 0
-            var originals = 0
-            // A 60fps source must remain consistently filtered at every supported target rate.
-            for (frame in 0 until 240) {
-                clock.ms = frame * 1_000L / 60
-                val action = policy.frameAction(true, 640, 432)
+            for (frame in 0 until 240 * 4) {
+                clock.ms = frame * 1_000L / 240
+                val action = policy.frameAction(true, 3840, 2160)
                 when (policy.completeFrame(action, action == PreviewFrameAction.Filter)) {
                     PreviewFrameAction.Filter -> filtered++
                     PreviewFrameAction.Drop -> dropped++
-                    PreviewFrameAction.Passthrough -> originals++
+                    PreviewFrameAction.Passthrough -> fail("target=$rate must never flash an original")
                 }
             }
             assertEquals("target=$rate", rate * 4, filtered)
-            assertEquals("target=$rate", 240 - filtered, dropped)
-            assertEquals("target=$rate must never flash an original", 0, originals)
+            assertEquals("target=$rate", 240 * 4 - filtered, dropped)
             assertNull(policy.degradeReason)
         }
     }
 
-    @Test fun `off missing filter and degraded stay passthrough while only explicit enable recovers`() {
+    @Test fun `missing or explicitly disabled filter remains passthrough without degradation`() {
         val clock = Clock()
         val policy = PreviewRenderPolicy(clock)
-        assertEquals(PreviewFrameAction.Passthrough, policy.frameAction(true, 640, 432))
+        assertEquals(PreviewFrameAction.Passthrough, policy.frameAction(true, 6000, 4000))
         policy.setEnabled(true)
-        assertEquals(PreviewFrameAction.Passthrough, policy.frameAction(false, 640, 432))
-        assertEquals(PreviewFrameAction.Filter, policy.frameAction(true, 640, 432))
-        assertEquals(PreviewFrameAction.Drop, policy.frameAction(true, 640, 432))
-        clock.ms = 3_000
-        assertEquals(PreviewFrameAction.Passthrough, policy.frameAction(true, 640, 432))
-        assertEquals(DegradeReason.LowProcessedFps, policy.degradeReason)
-        policy.setTargetFps(30)
-        clock.ms = 9_000
-        assertEquals(PreviewFrameAction.Passthrough, policy.frameAction(true, 640, 432))
-        policy.setEnabled(true)
-        assertEquals(PreviewFrameAction.Filter, policy.frameAction(true, 640, 432))
+        assertEquals(PreviewFrameAction.Passthrough, policy.frameAction(false, 6000, 4000))
+        clock.ms = 60_000
+        policy.evaluate()
+        assertNull(policy.degradeReason)
+        assertEquals(PreviewFrameAction.Filter, policy.frameAction(true, 6000, 4000))
         policy.setEnabled(false)
-        assertEquals(PreviewFrameAction.Passthrough, policy.frameAction(true, 640, 432))
-        policy.setEnabled(true)
-        assertEquals(PreviewFrameAction.Passthrough, policy.frameAction(true, 1120, 752))
-        assertEquals(DegradeReason.UnsupportedResolution, policy.degradeReason)
+        assertEquals(PreviewFrameAction.Passthrough, policy.frameAction(true, 6000, 4000))
+        assertEquals(FilterState.Off, policy.state(true))
     }
 
-    @Test fun `failed filter output drops originals until three-second explicit degradation`() {
-        for (rate in listOf(10, 15, 30)) {
-            val clock = Clock()
-            val policy = PreviewRenderPolicy(clock)
-            policy.setTargetFps(rate)
-            policy.setEnabled(true)
-            for (time in 0L until 3_000L step 10L) {
-                clock.ms = time
-                val action = policy.frameAction(true, 640, 432)
-                // Null/error output is not a processed frame and must never expose the original.
-                assertEquals("target=$rate time=$time", PreviewFrameAction.Drop,
-                    policy.completeFrame(action, filteredOutputAvailable = false))
-                assertEquals(FilterState.On, policy.state(true))
-                assertEquals(0f, policy.processedFps(), 0f)
-            }
-            clock.ms = 3_000
-            val degradedAction = policy.frameAction(true, 640, 432)
-            assertEquals(PreviewFrameAction.Passthrough, policy.completeFrame(degradedAction, false))
-            assertEquals(FilterState.Degraded, policy.state(true))
-            assertEquals(DegradeReason.LowProcessedFps, policy.degradeReason)
-            clock.ms = 10_000
-            assertEquals(PreviewFrameAction.Passthrough, policy.frameAction(true, 640, 432))
-            policy.setEnabled(true)
-            val retry = policy.frameAction(true, 640, 432)
-            assertEquals(PreviewFrameAction.Filter, policy.completeFrame(retry, true))
-        }
+    @Test fun `actual rendering exception stays distinct from performance drops until explicit retry`() {
+        val clock = Clock()
+        val policy = PreviewRenderPolicy(clock)
+        policy.setEnabled(true)
+        val action = policy.frameAction(true, 3840, 2160)
+        assertEquals(PreviewFrameAction.Passthrough,
+            policy.completeFrame(action, filteredOutputAvailable = false, renderingFailed = true))
+        assertEquals(FilterState.Degraded, policy.state(true))
+        assertEquals(DegradeReason.RenderingFailure, policy.degradeReason)
+        policy.setTargetFps(120)
+        policy.setEnabled(true) // Repeated settings emissions are not a new enable session.
+        clock.ms = 60_000
+        assertEquals(PreviewFrameAction.Passthrough, policy.frameAction(true, 3840, 2160))
+        policy.setEnabled(false)
+        policy.setEnabled(true)
+        assertEquals(PreviewFrameAction.Filter, policy.frameAction(true, 3840, 2160))
+        assertNull(policy.degradeReason)
+    }
+
+    @Test fun `drop notice gate permits one notice per enable session and rejects stale work`() {
+        val gate = PreviewFilterDropGate()
+        assertNull(gate.currentSession())
+        assertFalse(gate.onDropped(null))
+        gate.setEnabled(true)
+        val first = checkNotNull(gate.currentSession())
+        assertTrue(gate.onDropped(first))
+        repeat(10_000) { assertFalse(gate.onDropped(first)) }
+        gate.setEnabled(true)
+        assertEquals(first, gate.currentSession())
+        assertFalse(gate.onDropped(first))
+        gate.setEnabled(false)
+        assertFalse(gate.onDropped(first))
+        assertFalse(gate.isCurrent(first))
+        gate.setEnabled(true)
+        val second = checkNotNull(gate.currentSession())
+        assertNotEquals(first, second)
+        assertFalse(gate.onDropped(first))
+        assertTrue(gate.onDropped(second))
+        assertFalse(gate.onDropped(second))
     }
 
     @Test fun `decode bounds are dynamic sampled and reject malformed or extreme dimensions`() {
         assertEquals(JpegDecodePlan(1, 640, 432), JpegDecodePlan.forBounds(640, 432))
         assertEquals(JpegDecodePlan(1, 1600, 1072), JpegDecodePlan.forBounds(1600, 1072))
-        val large = checkNotNull(JpegDecodePlan.forBounds(6000, 4000))
-        assertEquals(JpegDecodePlan(4, 1500, 1000), large)
+        assertEquals(JpegDecodePlan(4, 1500, 1000), JpegDecodePlan.forBounds(6000, 4000))
         val portrait = checkNotNull(JpegDecodePlan.forBounds(4000, 6000))
         assertEquals(1000, portrait.width)
         assertEquals(1500, portrait.height)

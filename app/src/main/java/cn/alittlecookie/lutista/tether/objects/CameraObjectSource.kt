@@ -26,10 +26,17 @@ data class CameraObject(
 
 data class ObjectIdentity(val storageId: Long, val handle: Long)
 
+/** A discovered directory rejected its own child query; other branches can remain readable. */
+data class UnavailableDirectory(val directory: CameraObject, val responseCode: Int)
+
 sealed interface ObjectPage {
     /** At most 50 objects, in discovery order. Includes directories. */
     data class Batch(val items: List<CameraObject>) : ObjectPage
-    data class Complete(val total: Int, val byStorage: Map<Long, Int>) : ObjectPage
+    data class Complete(
+        val total: Int,
+        val byStorage: Map<Long, Int>,
+        val unavailableDirectories: List<UnavailableDirectory> = emptyList(),
+    ) : ObjectPage
 }
 
 interface CameraObjectSource {
@@ -39,6 +46,10 @@ interface CameraObjectSource {
     suspend fun listChildren(parent: Long, storageId: Long? = null): List<CameraObject>
     suspend fun getObjectInfo(handle: Long): CameraObject
     suspend fun fetchThumb(handle: Long): ByteArray
+    /** Reads an arbitrary window of an object (one PTP transaction, at most 512 KiB).
+     * Used to seed a range-backed video decoder without downloading the whole clip. */
+    suspend fun fetchRange(handle: Long, offset: Long, length: Int): ByteArray =
+        throw java.io.IOException("Range reads are not supported by this camera source")
     /** Only the first 512 KiB is read. Returns the largest decodable embedded JPEG. */
     suspend fun fetchRawPreview(handle: Long): ByteArray?
     /** Bounded to 4 MiB. Larger objects must use [streamObject]. */

@@ -91,6 +91,8 @@ class CameraSessionTest {
     ) : Transport, PtpDiagnostics {
         @Volatile override var isOpen = true
         @Volatile override var isFatal = false
+        @Volatile override var openRecoveryMs: Long = 0
+        @Volatile override var cameraSilent: Boolean = false
         @Volatile override var discardedEventContainers = 0
         val calls = CopyOnWriteArrayList<Call>()
         val observations = CopyOnWriteArrayList<IoObservation>()
@@ -373,6 +375,22 @@ class CameraSessionTest {
         assertAllIo(h, link)
     }
 
+    /**
+     * 传输层在 `open()` 里做过有界通道自愈时（[Transport.openRecoveryMs] > 0），这段耗时不该被
+     * PTP 会话建立的 5 s 预算判死；没有自愈（= 0）时预算必须分毫不动 —— 见相邻两条既有用例。
+     */
+    @Test fun `open channel recovery is refunded from the fixed connect budget`() = scenario {
+        val link = link()
+        val h = harness(link)
+        h.factory.onCreate = { h.clock.addAndGet(4_600); link }
+        link.openRecoveryMs = 900
+        // 除自愈之外握手本身也超出了原始预算：只有退款生效才能连上。
+        link.onTransaction = { h.clock.addAndGet(300); null }
+        assertEquals(ConnectOutcome.Connected, h.session.connect(target()))
+        assertEquals(1, h.factory.createCount.get())
+        assertAllIo(h, link)
+    }
+
     @Test fun `a second 201E fails instead of retrying again`() = scenario {
         val link = link()
         link.openCodes.addAll(listOf(0x201E, 0x201E))
@@ -493,6 +511,23 @@ class CameraSessionTest {
         assertFalse(UsbIoThread.isBound())
     }
 
+    @Test fun `silent camera failure asks for a power cycle instead of a cable replug`() = scenario {
+        val link = link()
+        // 传输层判定「相机一个字节都没回」：文案必须让用户关相机电源。
+        // 真机 logs_1795824713270：6 次尝试零回包，拔插数据线后依旧零回包，只有关电源才恢复。
+        link.cameraSilent = true
+        val timeout = PtpTimeoutException("bulk IN 超时/失败（ep=0x81 request=65536 timeout=1500ms）")
+        link.onTransaction = { throw timeout }
+        val h = harness(link)
+        val result = h.session.connect(target()) as ConnectOutcome.Failed
+        assertAwaitedFailure(timeout, result.cause)
+        assertEquals(TetherPhase.Fatal, h.session.state.value.phase)
+        val message = h.session.state.value.message
+        assertTrue("文案必须要求关掉相机电源；message=" + message, message.contains("相机电源关掉再打开"))
+        assertTrue("不能把「拔下数据线」当首选动作；message=" + message, !message.contains("请先拔下数据线"))
+        assertTrue("必须保留底层原因；message=" + message, message.contains("bulk IN 超时"))
+    }
+
     @Test fun `active queued and new operations receive the same original fatal`() = scenario {
         val link = link()
         val h = harness(link)
@@ -532,11 +567,18 @@ class CameraSessionTest {
         }
         val caller = async(start = CoroutineStart.UNDISPATCHED) { h.session.runOp { it.getProperty(1) } }
         entered.await()
-        val queued = async(start = CoroutineStart.UNDISPATCHED) { runCatching { h.session.runOp { it.getProperty(2) } } }
+        val queuedFailurePhase = CompletableDeferred<TetherPhase>()
+        val queued = async(kotlinx.coroutines.Dispatchers.Unconfined, start = CoroutineStart.UNDISPATCHED) {
+            runCatching { h.session.runOp { it.getProperty(2) } }.also {
+                // Observe the state during failure delivery, before abortAll can resume its worker.
+                queuedFailurePhase.complete(h.session.state.value.phase)
+            }
+        }
         caller.cancelAndJoin()
         assertFalse(link.isFatal)
         release.complete(Unit)
         assertAwaitedFailure(original, queued.await().exceptionOrNull())
+        assertEquals(TetherPhase.Fatal, queuedFailurePhase.await())
         assertEquals(TetherPhase.Fatal, h.session.state.value.phase)
         assertSame(original, failure<PtpTimeoutException> { h.session.runOp { it.getProperty(3) } })
         assertEquals(1, opcodes(link).count { it == 0x9402 })

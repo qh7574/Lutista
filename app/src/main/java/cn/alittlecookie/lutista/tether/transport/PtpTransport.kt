@@ -139,8 +139,13 @@ open class PtpException(message: String, cause: Throwable? = null) : Exception(m
 /**
  * bulk 超时 / 读写失败。
  *
- * 语义是 **fatal**：通道可能已经停在 halt，必须拔插相机（定稿 §6 约束 8）。
- * 传输层会同时把内部 `fatal` 置位，之后的所有事务直接抛异常，不做 `clear_halt` 硬重试。
+ * 语义**默认仍是 fatal**：通道可能已经停在 halt，必须拔插相机（定稿 §6 约束 8）。
+ *
+ * 2026-11-28 第七轮修订（交付记录 §13）：唯一例外是**实现能证明事务已闭合**——即
+ * `PtpUsbTransport` 在抛之前完成一次有界收尾（清 halt → 按声明长度精确排空 → 读到本事务的
+ * 结构合法 RESPONSE 容器），此时通道可证明干净，调用方可以把这次操作当普通失败、会话继续用。
+ * 收尾不成立（升级到设备级复位、排空没读满、响应事务号不符）时仍置 fatal，
+ * 之后的所有事务直接抛异常，不做 `clear_halt` 硬重试。
  */
 class PtpTimeoutException(message: String, cause: Throwable? = null) : PtpException(message, cause)
 
@@ -167,6 +172,24 @@ class PtpProtocolException(message: String, cause: Throwable? = null) : PtpExcep
  * 7. 事件 `txid` 恒为 `0xFFFFFFFF`（相机主动事件不带事务号），解码时不要用它做校验。
  */
 interface PtpTransport {
+
+    /**
+     * `open()` 内**通道自愈**实际花掉的毫秒数（清 halt → 精确排空 → 类请求 Cancel/DeviceReset →
+     * 重试预检），干净连接为 0。
+     *
+     * 会话层的 5 s 连接预算只买「PTP 会话建立」，不该为传输层自愈买单；干净连接恒 0 时
+     * 预算分毫不动，因此既有预算契约不受影响。语义见 [Transport.openRecoveryMs]。
+     */
+    val openRecoveryMs: Long get() = 0
+
+    /**
+     * `open()` 预检期间相机是否**一个字节都没回**（超时且 bulk IN 全程零字节）。
+     *
+     * 真机 `logs_1795824713270`（2026-11-28）证明：完全沉默的相机连类请求 `DeviceReset(0x66)`
+     * 都不回应，拔插数据线也不恢复，只能关相机电源再打开。会话层据此切换错误文案。
+     * 语义见 [Transport.cameraSilent]；默认 `false`。
+     */
+    val cameraSilent: Boolean get() = false
 
     /**
      * 打开设备：claim interface 0、取三个端点（bulkIn `0x81` / bulkOut `0x01` / intrIn `0x82`）、

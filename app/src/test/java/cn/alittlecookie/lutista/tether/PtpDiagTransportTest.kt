@@ -45,6 +45,21 @@ class PtpDiagTransportTest {
         assertEquals(0, diagnostics.pendingCollections)
     }
 
+    @Test fun recoveryStateReportedByTheTransportSurvivesTheDiagnosticWrapper() {
+        val delegate = RecordingTransport().also {
+            it.openRecoveryMs = 1_234L
+            it.cameraSilent = true
+        }
+        val wrapper = wrapper(delegate, ReadOnlyDiagnostics(), false)
+        // 真机回归：包装层漏转发会让会话层读到默认 0/false，导致预算不退、文案指向拔数据线。
+        assertEquals(1_234L, wrapper.openRecoveryMs)
+        assertTrue(wrapper.cameraSilent)
+        delegate.openRecoveryMs = 0L
+        delegate.cameraSilent = false
+        assertEquals(0L, wrapper.openRecoveryMs)
+        assertFalse(wrapper.cameraSilent)
+    }
+
     @Test fun allPhasesPreserveOriginalExceptionIncludingCancellationAndErrors() = runBlocking {
         for (phase in listOf("open", "transaction", "drain", "close")) {
             for (failure in listOf(PtpException("synthetic original"), CancellationException("original cancellation"), AssertionError("original error"))) {
@@ -181,6 +196,8 @@ class PtpDiagTransportTest {
         var transactionTimeout = 0
         var drainTimeout = 0
         var closeTimeout = 0
+        override var openRecoveryMs: Long = 0L
+        override var cameraSilent: Boolean = false
         var failingPhase: String? = null
         var failure: Throwable = PtpException("synthetic")
         private fun called(phase: String) { calls += phase; if (phase == failingPhase) throw failure }

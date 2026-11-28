@@ -1,5 +1,8 @@
 package cn.alittlecookie.lutista.tether.session
 
+import android.hardware.usb.UsbConstants
+import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbInterface
 import cn.alittlecookie.lutista.BuildConfig
 import cn.alittlecookie.lutista.tether.debug.CapabilityOverride
 import cn.alittlecookie.lutista.tether.debug.TetherDebugConfig
@@ -109,7 +112,7 @@ class TetherRuntime(
             if (device == null) {
                 val notice = if (devices.any { it.isVerifiedLumixMtpMode() })
                     TetherConnectionNotice.MtpUsbMode else TetherConnectionNotice.NoUsableUsb
-                return rejectConnection(notice)
+                return rejectConnection(notice, describeDevices(devices))
             }
             val target = UsbTarget(device, hub.hasPermission(device))
             val driver = driverLock.withLock {
@@ -149,13 +152,63 @@ class TetherRuntime(
         }
     }
 
-    private suspend fun rejectConnection(notice: TetherConnectionNotice): ConnectOutcome {
+    /**
+     * 把枚举结果压成一行描述符摘要（VID/PID/类/接口/端点）。
+     *
+     * 真机反馈里只看到 `source=usb_descriptor_no_usable_target` 时无法判断到底是「相机没枚举到」、
+     * 「相机回到 MTP 模式（PID 0x2372）」还是「接口/端点没对上」—— 这三种的处置完全不同，
+     * 所以把描述符原样记进日志。没有设备时记 `none`。
+     *
+     * 诊断永远不能影响连接：描述符读取本身可能抛异常（外设异常、测试替身不完整），
+     * 因此每一层都 runCatching，失败时退化成「能读到什么就记什么」。
+     */
+    private fun describeDevices(devices: List<UsbDevice>): String {
+        if (devices.isEmpty()) return "none"
+        return devices.joinToString(" | ") { device -> describeDevice(device) }
+    }
+
+    private fun describeDevice(device: UsbDevice): String {
+        val head = "vid=" + hex(device.vendorId, 4) + " pid=" + hex(device.productId, 4) +
+            " cls=" + runCatching { device.deviceClass }.getOrDefault(-1) +
+            " mtp=" + runCatching { device.isVerifiedLumixMtpMode() }.getOrDefault(false) +
+            " tether=" + runCatching { device.hasTetherBulkInterface() }.getOrDefault(false)
+        // 只读 interface 0：PTP 传输层只支持接口 0，碰其它接口既无意义也可能扰乱设备状态
+        // （TetherRuntimeTest 有「不得读取 interface 1」的契约用例）。
+        val interfaces = runCatching {
+            val count = device.interfaceCount
+            "count=" + count + (if (count > 0) " if0=" + describeInterface(device, 0) else "")
+        }.getOrElse { failure -> "unavailable(" + failure.javaClass.simpleName + ")" }
+        return head + " intf[" + interfaces + "]"
+    }
+
+    private fun describeInterface(device: UsbDevice, index: Int): String = runCatching {
+        val intf = device.getInterface(index)
+        val endpoints = (0 until intf.endpointCount).joinToString("+") { ep -> describeEndpoint(intf, ep) }
+        "if$index(" + intf.interfaceClass + "/" + intf.interfaceSubclass + "/" + intf.interfaceProtocol +
+            ":" + endpoints + ")"
+    }.getOrElse { failure -> "if$index(unavailable:" + failure.javaClass.simpleName + ")" }
+
+    private fun describeEndpoint(intf: UsbInterface, index: Int): String = runCatching {
+        val endpoint = intf.getEndpoint(index)
+        hex(endpoint.address, 2) +
+            (if (endpoint.type == UsbConstants.USB_ENDPOINT_XFER_BULK) "b" else "i") +
+            (if (endpoint.direction == UsbConstants.USB_DIR_IN) "in" else "out") +
+            "@" + endpoint.maxPacketSize
+    }.getOrElse { failure -> "#" + index + "(unavailable:" + failure.javaClass.simpleName + ")" }
+
+    private fun hex(value: Int, width: Int): String = "0x" + value.toString(16).padStart(width, '0')
+
+    private suspend fun rejectConnection(notice: TetherConnectionNotice, descriptors: String = ""): ConnectOutcome {
         // A prior connection may still be winding down after a USB broadcast. Always release it.
         driverLock.withLock { active?.disconnect(CloseReason.RECONNECT) }
         mutableConnectionNotice.value = notice
         mutableState.value = TetherState(TetherPhase.NotAttached, message = notice.message)
         mutableMessage.value = notice.message
-        logger.log("connect", "blockedBeforeOpen=true; notice=" + notice.name + "; source=" + notice.source)
+        logger.log(
+            "connect",
+            "blockedBeforeOpen=true; notice=" + notice.name + "; source=" + notice.source +
+                "; devices=" + descriptors,
+        )
         return ConnectOutcome.NotAttached
     }
 

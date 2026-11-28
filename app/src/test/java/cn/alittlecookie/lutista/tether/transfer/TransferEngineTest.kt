@@ -20,6 +20,8 @@ class TransferEngineTest {
     }
     private class MemoryTargetStorage : TransferTargetStorage {
         val commits = CopyOnWriteArrayList<String>()
+        val releases = CopyOnWriteArrayList<String>()
+        val swept = CopyOnWriteArrayList<Set<String>>()
         override suspend fun prepare(key: String, info: CameraObject, kind: TransferKind): TransferTarget = object : TransferTarget {
             override val destinationHint = "memory:$key"
             private val bytes = java.io.ByteArrayOutputStream()
@@ -30,10 +32,12 @@ class TransferEngineTest {
             override fun close() = Unit
         }
         override suspend fun recover(record: TransferRecord) = null
+        override suspend fun release(record: TransferRecord, downloaded: DownloadedTransfer) { releases += record.key }
+        override suspend fun sweepOrphanedStaging(protectedKeys: Set<String>) { swept += protectedKeys }
     }
     private class FakeSubmitter : TetherTaskSubmitter {
         var enabled = true
-        var effects = TetherEffects(1, 0)
+        var effects: TetherEffects? = TetherEffects(1, 0)
         val submissions = CopyOnWriteArrayList<String>()
         override suspend fun automaticEnabled() = enabled
         override suspend fun resolveEffects() = effects
@@ -87,6 +91,43 @@ class TransferEngineTest {
         assertEquals(1, target.commits.size)
         assertEquals(TransferState.FAILED, store.rows.values.first { it.handle == 7L }.state)
         assertEquals(TransferState.DONE, store.rows.values.first { it.handle == 8L }.state)
+        engine.close()
+    }
+
+    @Test fun committedOriginalReleasesPrivateStagingWhenNoProcessingTaskOwnsIt() = runBlocking {
+        val source = FakeSource(jpeg(), byteArrayOf(1, 2, 3, 4)); val store = MemoryStore()
+        val target = MemoryTargetStorage(); val submitter = FakeSubmitter().apply { effects = null }
+        val engine = TransferEngine(this, store, target, submitter); engine.startSession(source)
+        engine.enqueueManual(source.sessionKey, listOf(jpeg()))
+        withTimeout(2_000) { engine.awaitIdle() }
+        assertEquals(1, target.commits.size)
+        assertEquals(target.commits.toList(), target.releases.toList())
+        assertEquals(TransferState.DONE, store.rows.values.single().state)
+        engine.close()
+    }
+
+    @Test fun stagingSweepProtectsRecoverableTransferIdentities() = runBlocking {
+        val store = MemoryStore()
+        store.rows["manual-key" to TransferKind.MANUAL] = TransferRecord(
+            id = 1, key = "manual-key", kind = TransferKind.MANUAL, handle = 7, name = "IMG.JPG",
+            size = 4, state = TransferState.DOWNLOADED, createdAt = 0,
+        )
+        val target = MemoryTargetStorage()
+        val engine = TransferEngine(this, store, target, FakeSubmitter())
+        engine.sweepOrphanedStaging()
+        assertEquals(setOf("MANUAL-manual-key"), target.swept.single())
+        engine.close()
+    }
+
+    @Test fun processingTaskKeepsTheReadableStagingOriginal() = runBlocking {
+        val source = FakeSource(jpeg(), byteArrayOf(1, 2, 3, 4)); val store = MemoryStore()
+        val target = MemoryTargetStorage(); val submitter = FakeSubmitter()
+        val engine = TransferEngine(this, store, target, submitter); engine.startSession(source)
+        engine.enqueueManual(source.sessionKey, listOf(jpeg()))
+        withTimeout(2_000) { engine.awaitIdle() }
+        assertEquals(1, submitter.submissions.size)
+        assertTrue(target.releases.isEmpty())
+        assertEquals(TransferState.DONE, store.rows.values.single().state)
         engine.close()
     }
 }

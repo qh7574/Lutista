@@ -45,10 +45,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.DropdownDefaults
+import top.yukonga.miuix.kmp.basic.DropdownImpl
 import top.yukonga.miuix.kmp.basic.IconButton
+import top.yukonga.miuix.kmp.basic.ListPopupColumn
+import top.yukonga.miuix.kmp.basic.PopupPositionProvider
 import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
+import top.yukonga.miuix.kmp.overlay.OverlayListPopup
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @Composable
@@ -85,8 +90,7 @@ internal fun TetherLiveView(
                 TetherButton("返回", { requestExit(TetherExitDestination.Back) }, enabled = !(live.isVideoMode && live.captureBusy))
                 Column(Modifier.weight(1f)) {
                     Text("实时预览", fontWeight = FontWeight.SemiBold, fontSize = 19.sp, color = MiuixTheme.colorScheme.onSurface)
-                    val format = live.formats.firstOrNull { it.index == live.selectedFormatIndex }
-                    Text(listOfNotNull(state.cameraName, format?.dimensions,
+                    Text(listOfNotNull(state.cameraName, live.receivedDimensions,
                         live.receivedFps?.let { String.format(java.util.Locale.ROOT, "%.1f fps", it) }).joinToString(" · ").ifBlank { state.connectionSummary },
                         fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
                 }
@@ -154,7 +158,7 @@ internal fun TetherLiveView(
             }
         }
     }
-    if (showFormats) TetherFormatDialog(state, onAction) { showFormats = false }
+    TetherFormatDialog(show = showFormats, state = state, onAction = onAction) { showFormats = false }
     explanation?.let { message -> TetherConfirmDialog("当前不可用", message, confirm = "知道了", dismiss = "关闭",
         onConfirm = { explanation = null }, onDismiss = { explanation = null },
         extra = if (filterExplanation) ({ TetherButton("前往全局滤镜设置", { explanation = null; requestExit(TetherExitDestination.GlobalFilterSettings) }, Modifier.fillMaxWidth()) }) else null) }
@@ -210,9 +214,11 @@ private fun TetherParameterPanel(
                 TetherButton(state.parameters.photoStyle?.let { "照片格调 · 格调 $it" } ?: "照片格调 · —", onPhotoStyles, Modifier.fillMaxWidth(), enabled = !state.parameters.photoStyleWriting)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("自动下载 JPEG", Modifier.weight(1f), fontSize = 12.sp, color = MiuixTheme.colorScheme.onSurface)
+                Text("拍摄后自动回传 JPEG", Modifier.weight(1f), fontSize = 12.sp, color = MiuixTheme.colorScheme.onSurface)
                 Switch(checked = state.liveView.autoDownload, onCheckedChange = { onAction(TetherUiAction.SetAutoDownload(it)) }, enabled = state.liveView.autoDownloadAvailable)
             }
+            Text(state.liveView.autoDownloadDestinationLabel, fontSize = 10.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+            Text("未启用处理效果时保留原片；有效效果将按主页设置处理。", fontSize = 10.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
             state.liveView.autoDownloadReason?.let { Text(it, fontSize = 10.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary) }
         }
         }
@@ -225,7 +231,7 @@ private fun TetherLiveImage(state: TetherUiState, onAction: (TetherUiAction) -> 
     Box(modifier.clip(RoundedCornerShape(20.dp)).background(Color.Black), contentAlignment = Alignment.Center) {
         TetherImageView(live.image, "相机实时取景", Modifier.fillMaxSize().alpha(if (live.switchingFormat) .35f else 1f))
         when {
-            live.switchingFormat -> TetherBusy("正在切换取景格式…")
+            live.switchingFormat -> TetherBusy("正在切换预览分辨率…")
             live.starting -> TetherBusy("正在启动实时预览…")
             live.error != null -> Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(16.dp)) {
                 Text(live.error, color = Color.White, fontSize = 12.sp)
@@ -266,36 +272,64 @@ private fun TetherShutterToolbar(
         Column(modifier.padding(horizontal = 4.dp, vertical = 8.dp).verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
             shutter(); filter()
             TetherButton("图库", { requestExit(TetherExitDestination.Gallery) }, Modifier.fillMaxWidth(), enabled = !(live.isVideoMode && live.captureBusy))
-            if (state.capabilities.canSwitchLiveViewFormat && live.formats.size > 1) TetherButton("格式", onFormats, Modifier.fillMaxWidth(), enabled = !live.switchingFormat && !live.isRecording)
-            else TetherButton("帧率", onFormats, Modifier.fillMaxWidth())
+            TetherButton("分辨率", onFormats, Modifier.fillMaxWidth())
         }
     } else {
         Row(modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
             TetherButton("图库", { requestExit(TetherExitDestination.Gallery) }, enabled = !(live.isVideoMode && live.captureBusy)); filter(); shutter()
-            TetherButton(if (state.capabilities.canSwitchLiveViewFormat && live.formats.size > 1) "格式" else "帧率", onFormats, enabled = !live.switchingFormat)
+            TetherButton("分辨率", onFormats)
         }
     }
 }
 
 @Composable
-private fun TetherFormatDialog(state: TetherUiState, onAction: (TetherUiAction) -> Unit, onDismiss: () -> Unit) {
+private fun TetherFormatDialog(show: Boolean, state: TetherUiState, onAction: (TetherUiAction) -> Unit, onDismiss: () -> Unit) {
     val live = state.liveView
-    OverlayDialog(show = true, onDismissRequest = onDismiss) {
+    OverlayDialog(show = show, onDismissRequest = onDismiss) {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (state.capabilities.canSwitchLiveViewFormat && live.formats.size > 1) {
-                Text("取景格式", fontSize = 19.sp, fontWeight = FontWeight.SemiBold, color = MiuixTheme.colorScheme.onSurface)
-                live.formats.forEach { format ->
-                    TetherButton("${format.label} · ${format.dimensions}", { onAction(TetherUiAction.SetLiveViewFormat(format.index)); onDismiss() }, Modifier.fillMaxWidth(), enabled = !live.switchingFormat && !live.isRecording, primary = format.index == live.selectedFormatIndex)
-                    if (format.note.isNotBlank()) Text(format.note, fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-                }
-            }
+            Text("预览分辨率", fontSize = 19.sp, fontWeight = FontWeight.SemiBold, color = MiuixTheme.colorScheme.onSurface)
+            TetherResolutionDropdown(state, onAction)
+            Text("选项来自相机的预览格式枚举，不影响拍摄文件分辨率。", fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+            live.receivedDimensions?.let { Text("当前接收画面：$it", fontSize = 12.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary) }
             Text("预览滤镜目标帧率", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = MiuixTheme.colorScheme.onSurface)
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { listOf(10, 15, 30).forEach { fps ->
                 TetherButton("$fps fps", { onAction(TetherUiAction.SetTargetFps(fps)) }, Modifier.weight(1f), primary = live.targetFps == fps)
             } }
-            Text("相机接收帧率与滤镜处理帧率分别统计。高分辨率格式不启用预览滤镜。", fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+            Text("相机接收帧率与滤镜处理帧率分别统计。所有预览分辨率均可使用滤镜；处理不及时会跳过旧帧并提示一次，滤镜保持开启。", fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
             live.processedFps?.let { Text(String.format(java.util.Locale.ROOT, "滤镜处理 %.1f fps", it), fontSize = 12.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary) }
             TetherButton("完成", onDismiss, Modifier.fillMaxWidth())
         }
     }
+}
+
+@Composable
+private fun TetherResolutionDropdown(state: TetherUiState, onAction: (TetherUiAction) -> Unit) {
+    val live = state.liveView
+    val selected = live.selectedFormat
+    val unavailableReason = state.liveViewFormatUnavailableReason()
+    var expanded by remember { mutableStateOf(false) }
+    LaunchedEffect(unavailableReason) { if (unavailableReason != null) expanded = false }
+    Box(Modifier.fillMaxWidth()) {
+        TetherButton(selected?.dimensions?.let { "$it ▾" } ?: "选择相机分辨率 ▾", { expanded = true },
+            Modifier.fillMaxWidth().semantics { contentDescription = "预览分辨率 ${selected?.dimensions ?: "尚未选择"}" },
+            enabled = unavailableReason == null)
+        OverlayListPopup(show = expanded && unavailableReason == null, onDismissRequest = { expanded = false },
+            alignment = PopupPositionProvider.Align.End) {
+            ListPopupColumn {
+                live.formats.forEachIndexed { position, format ->
+                    DropdownImpl(text = "${format.dimensions} · ${format.label}", optionSize = live.formats.size,
+                        isSelected = format.index == live.selectedFormatIndex, index = position,
+                        dropdownColors = DropdownDefaults.dropdownColors(),
+                        onSelectedIndexChange = {
+                            expanded = false
+                            if (unavailableReason == null && format.index != live.selectedFormatIndex) {
+                                onAction(TetherUiAction.SetLiveViewFormat(format.index))
+                            }
+                        })
+                }
+            }
+        }
+    }
+    unavailableReason?.let { Text(it, fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary) }
+    selected?.note?.takeIf { it.isNotBlank() }?.let { Text(it, fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary) }
 }

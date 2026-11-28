@@ -22,7 +22,7 @@ enum class TetherParameterKey { Iso, Shutter, ExposureCompensation, Aperture, Wh
 enum class TetherExitDestination { Back, Gallery, GlobalFilterSettings }
 enum class TetherConnectionGuide { NoUsb, MtpDescriptor, WrongMode, UnknownDevice }
 
-/** Derived by Repository/Route; Unknown capabilities are attemptable, Unsupported entries are hidden. */
+/** Unknown capabilities remain attemptable; unsupported capabilities render an explanatory unavailable state. */
 data class TetherCapabilities(
     val canBrowse: Boolean = false,
     val canDownload: Boolean = false,
@@ -74,6 +74,7 @@ data class TetherGalleryUi(
     val error: String? = null,
     val destination: String = "Pictures/Lutista",
     val destinationWritable: Boolean = true,
+    val directoryWarning: String? = null,
 )
 
 data class TetherPreviewUi(
@@ -133,8 +134,11 @@ data class TetherLiveViewUi(
     val frozen: Boolean = false,
     val error: String? = null,
     val formats: List<TetherLiveViewFormatUi> = emptyList(),
-    val selectedFormatIndex: Int = 0,
+    /** Index of a successfully applied camera tuple; -1 means no confirmed selection yet. */
+    val selectedFormatIndex: Int = -1,
     val switchingFormat: Boolean = false,
+    /** Actual JPEG dimensions from the latest decoded camera frame, not advertised tuple hints. */
+    val receivedDimensions: String? = null,
     val receivedFps: Float? = null,
     val processedFps: Float? = null,
     val targetFps: Int = 15,
@@ -149,7 +153,27 @@ data class TetherLiveViewUi(
     val autoDownload: Boolean = false,
     val autoDownloadAvailable: Boolean = false,
     val autoDownloadReason: String? = null,
-)
+    val autoDownloadDestination: String = "",
+) {
+    /** Preserve the camera's advertised index; never fall back to a different tuple. */
+    val selectedFormat: TetherLiveViewFormatUi? get() = formats.firstOrNull { it.index == selectedFormatIndex }
+    val autoDownloadDestinationLabel: String get() = autoDownloadDestination.takeIf { it.isNotBlank() }
+        ?.let { "回传至主页监控文件夹：$it" } ?: "请先在主页设置监控文件夹"
+}
+
+/** Keep the resolution entry visible; explain why its advertised choices cannot be changed. */
+internal fun TetherUiState.liveViewFormatUnavailableReason(): String? = when {
+    !connected -> "相机未连接"
+    liveView.switchingFormat -> "正在切换预览分辨率…"
+    liveView.starting -> "正在读取相机支持的预览分辨率…"
+    liveView.formats.isEmpty() -> "相机未返回可用的预览分辨率"
+    liveView.formats.size == 1 -> "相机仅提供一种预览分辨率"
+    !capabilities.canSwitchLiveViewFormat -> "当前相机能力未开放预览分辨率切换"
+    liveView.isRecording -> "录像中无法切换预览分辨率"
+    liveView.captureBusy -> "拍摄处理中，暂时无法切换预览分辨率"
+    !liveView.running -> "实时预览启动后可切换分辨率"
+    else -> null
+}
 
 data class TetherTransferItemUi(
     val handle: Long,
