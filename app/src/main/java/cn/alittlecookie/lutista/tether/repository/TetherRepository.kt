@@ -414,6 +414,10 @@ class TetherRepository(
             // Poll real mode/descriptors at a modest rate; no property scans or guessed writes.
             controllerJobs += scope.launch {
                 while (isActive && activeDriver === driver) {
+                    // 传输进行中/刚结束时不要再发参数查询：真机 logs_1795841499743 12:51:22 那次
+                    // 「USB 已断开」就是紧跟在两次 9 MB 传输之后的 24 字节 0x9108 被相机 NAK 到
+                    // 超时、进而判 fatal。传输的空档本来就有几秒，推迟一轮刷新没有任何副作用。
+                    if (transferInFlight()) { delay(500); continue }
                     try { config.refreshCatalog() }
                     catch (cancel: CancellationException) { throw cancel }
                     catch (failure: Throwable) { if (driver.session.isFatal) return@launch }
@@ -439,6 +443,20 @@ class TetherRepository(
                 delay(250)
             }
         }
+    }
+
+    /**
+     * 是否有传输正在占用相机（下载原片 / 自动回传）。
+     *
+     * 参数轮询要在这段时间里让路：真机 logs_1795841499743 显示，9 MB 数据段刚结束或刚被取消时，
+     * 紧接着的 24 字节 `0x9108` 会被相机连续 NAK 到超时，进而把会话判成 fatal。
+     */
+    private fun transferInFlight(): Boolean {
+        val snapshot = transfers.progress.value
+        return snapshot.queued > 0 ||
+            snapshot.state == TransferState.PENDING ||
+            snapshot.state == TransferState.RUNNING ||
+            snapshot.state == TransferState.SUBMITTING
     }
 
     /** 滤镜直出只有在存在有效滤镜或签名时才会产出成品；否则开关开着也只回传原片。 */
@@ -663,7 +681,12 @@ class TetherRepository(
             entity.name.endsWith(".rw2", true) || entity.name.endsWith(".raw", true) -> TetherMediaKind.Raw
             entity.name.endsWith(".mov", true) || entity.name.endsWith(".mp4", true) -> TetherMediaKind.Video
             else -> TetherMediaKind.Unknown }
-        val previewKind = if (kind == TetherMediaKind.Jpeg) CameraThumbKey.Kind.FULL_JPEG else CameraThumbKey.Kind.RAW_PREVIEW_1920
+        // 全屏预览一律用相机内嵌的 1920 预览，**不再**整张拉取原图。
+        // [CameraThumbKey.Kind.FULL_JPEG] 会把整个文件（真机 ~9 MB）流进临时文件，而 Coil 会在
+        // 用户按返回/滑动换图时于数据段中途取消它：真机 logs_1795841499743 12:51:14 与 12:51:20
+        // 两次都是这样把相机逼进「下一条 24 字节命令 bulk OUT 直接 -1」的状态，用户看到
+        // 「USB 已断开」。GetPartialObject 只读文件头 512 KiB，代价与风险都小得多。
+        val previewKind = CameraThumbKey.Kind.RAW_PREVIEW_1920
         val progress = mediaProgress[entity.handle]
         return TetherMediaUi(entity.handle, entity.name, kind, entity.storageId, entity.parent, true, entity.size,
             capturedAt = entity.dateTaken.takeIf(String::isNotBlank), durationLabel = entity.durationMs?.let { "${it / 60000}:${(it / 1000 % 60).toString().padStart(2, '0')}" },

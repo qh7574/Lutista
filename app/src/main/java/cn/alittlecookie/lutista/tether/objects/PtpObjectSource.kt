@@ -128,9 +128,14 @@ class PtpObjectSource internal constructor(
 
     override suspend fun fetchRawPreview(handle: Long): ByteArray? {
         require(getObjectInfo(handle).format == quirks.rawFormat) { "Object is not a profile RAW format" }
+        return fetchEmbeddedPreview(handle)
+    }
+
+    override suspend fun fetchEmbeddedPreview(handle: Long): ByteArray? {
+        ObjectInfoParser.requireHandle(handle)
         val preview = try {
             val head = payload(access.partial(handle, 0L, RAW_PREVIEW_BYTES.toLong()), "GetPartialObject")
-            check(head.size <= RAW_PREVIEW_BYTES) { "RAW preview exceeded its requested window" }
+            check(head.size <= RAW_PREVIEW_BYTES) { "Embedded preview exceeded its requested window" }
             try { JpegScanner.largestDecodable(head, decodeJpeg) } catch (_: IllegalArgumentException) { null }
         } catch (_: CameraObjectResponseException) {
             null

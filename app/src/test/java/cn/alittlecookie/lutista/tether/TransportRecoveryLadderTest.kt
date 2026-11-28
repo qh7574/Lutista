@@ -299,6 +299,58 @@ class TransportRecoveryLadderTest {
         }
     }
 
+    // ───── 用例 6c：刚被取消的大数据段之后，OUT 允许 300/600/900 ms 递进退避 ─────
+
+    @Test
+    fun `取消大数据段之后的命令写入失败会退避重试而不是立刻判死`() = runBlocking {
+        val camera = FakeCamera()
+        camera.dataPayloadBytes = 4_096
+        val h = harness(camera)
+        h.transport.open(h.device, h.conn)
+        camera.resetOut()
+        camera.resetControls()
+
+        try {
+            h.transport.transaction(
+                op = PtpOp(PtpConstants.Op.GET_OBJECT, longArrayOf(0x10001L)),
+                expectedData = true,
+                dataOut = null,
+                dataSink = { _, _ -> throw CancellationException("全屏预览被关闭") },
+                timeoutMs = 30_000,
+            )
+            fail("取消必须原样抛回调用方")
+        } catch (_: CancellationException) {
+            assertFalse(h.transport.isFatal)
+        }
+
+        // 真机 logs_1795841499743 12:51:22：取消排空 9 MB 之后，参数轮询的 24 字节命令
+        // 连续两次被 NAK，只重试一次就判 fatal。这里让前两次写都失败，第三次必须成功。
+        camera.resetOut()
+        camera.resetControls()
+        camera.outFailures = 2
+        val baseline = camera.outTimeouts.size
+        val next = h.transport.transaction(
+            op = PtpOp(PtpConstants.Op.GET_OBJECT_INFO, longArrayOf(0x10001L)),
+            expectedData = true,
+            dataOut = null,
+            dataSink = { _, _ -> },
+            timeoutMs = 2_000,
+        )
+        assertEquals("退避重试必须把命令救回来", PtpConstants.Rc.OK, next.code)
+        assertFalse("救回来之后绝不能判死会话", h.transport.isFatal)
+        assertTrue(h.transport.isOpen)
+        val timeouts = camera.outTimeouts.drop(baseline)
+        assertEquals("应当是「首次写 + 两次退避重试」共三次：$timeouts", 3, timeouts.size)
+        assertTrue(
+            "首次写仍用事务原超时（只被 deadline 余量削掉几毫秒）：${timeouts[0]}",
+            timeouts[0] in 1_500..2_000,
+        )
+        assertEquals("第一次重试用 300 ms", 300, timeouts[1])
+        assertEquals("第二次重试递进到 600 ms", 600, timeouts[2])
+        assertFalse("救回来的事务不需要设备级复位", camera.sawDeviceReset)
+        assertTrue(camera.setInterfaceCalls.isEmpty())
+    }
+
     // ───── 用例 6b：下游抛非取消异常时立即中断（不读垃圾、也不动通道） ─────
 
     @Test

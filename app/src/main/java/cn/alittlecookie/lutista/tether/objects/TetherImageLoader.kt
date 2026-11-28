@@ -87,7 +87,7 @@ class CameraThumbFetcher(
         }
         val bytes = when (key.kind) {
             CameraThumbKey.Kind.THUMB_160 -> thumbnailOrVideoFrame(source, key.handle)
-            CameraThumbKey.Kind.RAW_PREVIEW_1920 -> source.fetchRawPreview(key.handle)
+            CameraThumbKey.Kind.RAW_PREVIEW_1920 -> source.fetchEmbeddedPreview(key.handle)
             CameraThumbKey.Kind.FULL_JPEG -> error("Handled above")
         } ?: return null
         check(bytes.size.toLong() <= PtpObjectSource.MAX_IN_MEMORY_BYTES) { "Camera preview exceeds 4 MiB" }

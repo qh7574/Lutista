@@ -241,6 +241,18 @@ class PtpObjectSourceTest {
         assertEquals(1, access.thumbReads)
     }
 
+    @Test fun embeddedPreviewWorksForJpegObjectsWithoutWholeFileDownload() = runBlocking {
+        // 真机 logs_1795841499743：全屏预览曾拉整张 9 MB 原图，返回键取消后相机拒收命令。
+        val access = FakeObjectAccess().apply {
+            infos = mapOf(1L to objectInfo(format = 0x3801))
+            head = jpeg(1) + jpeg(7) + jpeg(2)
+        }
+        assertArrayEquals(jpeg(7), source(access).fetchEmbeddedPreview(1))
+        assertEquals(512L * 1024, access.partialLength)
+        assertEquals(0, access.thumbReads)
+        assertEquals(0, access.streamCalls)
+    }
+
     @Test fun rangeReadsUseTheRequestedOffsetForSparseVideoDecoding() = runBlocking {
         val access = FakeObjectAccess().apply { head = jpeg(7) }
         val bytes = source(access).fetchRange(1, 12_345L, 64 * 1024)

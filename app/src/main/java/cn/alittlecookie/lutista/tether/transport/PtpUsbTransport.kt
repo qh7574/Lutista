@@ -131,6 +131,20 @@ class PtpUsbTransport(
          */
         const val STALL_RETRY_TIMEOUT_MS = 300
 
+        /**
+         * 刚被取消的大数据段之后，bulk OUT 允许的退避重试次数。
+         *
+         * 真机 `logs_1795841499743`：全屏预览把一张 9 MB 原图读到一半被取消（Coil 请求被取消），
+         * 我们按「读完再抛」把剩余字节排空并收下 `rc=0x2001`，通道在协议层是干净的；可紧接着
+         * 参数轮询的 24 字节 `0x9108` 仍然被相机连续 NAK，只重试一次就判 fatal —— 用户在
+         * 「下载原图」后看到「USB 已断开」。相机在大传输收尾后需要几百毫秒才重新收命令，
+         * 所以这里给 300/600/900 ms 三次递进重试（合计 ≤1.8 s），仍远小于一次事务预算。
+         */
+        const val STALL_RETRY_ATTEMPTS = 3
+
+        /** 只有「最近这么久之内刚排空过一个被打断的数据段」才启用上面的退避重试。 */
+        const val STALL_BACKOFF_WINDOW_MS = 5_000L
+
         /** `GetDeviceInfo` 回包长度上限：S1 是 223 B，留足余量但仍远小于任何"通道错位狂吐数据"的规模。 */
         const val MAX_DEVICE_INFO_BYTES = 64 * 1024
 
@@ -325,6 +339,15 @@ class PtpUsbTransport(
     private var lastTransactionRecoveryMs: Long = 0
 
     /**
+     * 最近一次「数据段被下游打断、靠排空收尾」的时刻（[now] 的毫秒值）。
+     *
+     * 用来给紧接着的 bulk OUT 开退避重试窗口：真机 `logs_1795841499743` 12:51:14/20 两次
+     * 9 MB 预览传输被取消并排空，随后 24 字节的 `0x9108` 连续 NAK 到超时；相机显然需要
+     * 几百毫秒才重新收命令。窗口之外的普通写失败仍然只重试一次，保持既定超时语义。
+     */
+    private var lastAbortedDataPhaseAt: Long = 0
+
+    /**
      * 本次 `open()` 里通道自愈实际花掉的毫秒数（没有自愈就是 0）。
      *
      * 会话层的 5 s 连接预算只买「PTP 会话建立」，不该为传输层自愈买单：真机
@@ -420,6 +443,7 @@ class PtpUsbTransport(
             this.lastTransactionRecoveryMs = 0
             this.openSawBytes = false
             this.cameraSilent = false
+            this.lastAbortedDataPhaseAt = 0
             // 上一次会话若在数据段里被打断，端点可能停在 halt：新版 open 主动清掉，
             // 这样「一次超时之后必须拔数据线」的多数情况不需要用户真的拔线。
             // 先读 halt 位、再清：只记 `clearHalt(in=true out=true)` 无法区分「相机把端点停住了」
@@ -639,20 +663,40 @@ class PtpUsbTransport(
         // （重试会在帧尾多塞一个 0 长包，把容器边界推歪）。
         if (first > 0 || offset != 0 || length == 0) return first
         Timber.tag(LOG_TAG).w(
-            "bulk OUT 首包写入失败（ep=0x%02x length=%d 返回 %d），清 halt 后重试一次",
+            "bulk OUT 首包写入失败（ep=0x%02x length=%d 返回 %d），清 halt 后重试",
             endpoint.address,
             length,
             first,
         )
-        if (!clearEndpointHalt(conn, endpoint)) return first
-        // 重写用短超时：清 halt 之后该端点在毫秒级就能接受这 12~24 字节；再等满 1.5 s 只是
-        // 把「设备完全不收命令」拖成两倍时长，把连接预算烧光（真机 logs_1795826645352）。
-        val retryTimeout = minOf(timeoutMs, STALL_RETRY_TIMEOUT_MS)
-        val retried = conn.bulkTransfer(endpoint, buffer, offset, length, retryTimeout)
-        // 重试成功说明「清 halt」确实解开了这条通道 —— 但第一次写已经把事务 deadline 吃掉了，
-        // 必须续期，否则紧接着的读响应会立刻以「deadline 已过」失败（见
-        // [OUT_RECOVERY_GRACE_MS] 的真机证据），把救回来的事务再判死一次。
-        if (retried > 0) onStallCleared?.invoke()
+        // 刚被取消/收尾的大数据段之后，相机需要几百毫秒才重新接受命令：这段时间里给
+        // 300/600/900 ms 三次递进短超时（见 [STALL_RETRY_ATTEMPTS]）。其余情况维持一次
+        // 短重试的既有语义，避免把「设备真的不收命令」拖长。
+        val inBackoffWindow = lastAbortedDataPhaseAt > 0 &&
+            now() - lastAbortedDataPhaseAt <= STALL_BACKOFF_WINDOW_MS
+        val attempts = if (inBackoffWindow) STALL_RETRY_ATTEMPTS else 1
+        var retried = first
+        for (attempt in 1..attempts) {
+            if (!clearEndpointHalt(conn, endpoint)) return retried
+            // 重写用短超时：清 halt 之后该端点在毫秒级就能接受这 12~24 字节；再等满 1.5 s 只是
+            // 把「设备完全不收命令」拖成两倍时长，把连接预算烧光（真机 logs_1785826645352）。
+            val retryTimeout = minOf(timeoutMs, STALL_RETRY_TIMEOUT_MS * attempt)
+            retried = conn.bulkTransfer(endpoint, buffer, offset, length, retryTimeout)
+            if (retried > 0) {
+                if (attempt > 1) {
+                    Timber.tag(LOG_TAG).w(
+                        "bulk OUT 第 %d 次重写成功（ep=0x%02x，超时 %d ms）：相机在数据段收尾后短暂拒收命令",
+                        attempt,
+                        endpoint.address,
+                        retryTimeout,
+                    )
+                }
+                // 重试成功说明「清 halt」确实解开了这条通道 —— 但前面的写已经把事务 deadline
+                // 吃掉了，必须续期，否则紧接着的读响应会立刻以「deadline 已过」失败（见
+                // [OUT_RECOVERY_GRACE_MS] 的真机证据），把救回来的事务再判死一次。
+                onStallCleared?.invoke()
+                return retried
+            }
+        }
         return retried
     }
 
@@ -1268,6 +1312,9 @@ class PtpUsbTransport(
                     dataBytes,
                     result.code,
                 )
+                // 相机在刚被丢下一个数据段之后会有几百毫秒不收新命令：记下时刻，让紧接着的
+                // bulk OUT 走退避重试（真机 logs_1795841499743 12:51:22 的 fatal 就是这么来的）。
+                lastAbortedDataPhaseAt = now()
                 throw failure
             }
             if (expectedData && !sawDataPhase) {

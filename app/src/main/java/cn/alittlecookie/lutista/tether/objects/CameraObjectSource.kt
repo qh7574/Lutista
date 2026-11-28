@@ -52,6 +52,15 @@ interface CameraObjectSource {
         throw java.io.IOException("Range reads are not supported by this camera source")
     /** Only the first 512 KiB is read. Returns the largest decodable embedded JPEG. */
     suspend fun fetchRawPreview(handle: Long): ByteArray?
+
+    /**
+     * 读出对象头部内嵌的 JPEG 预览（JPEG 与 RAW 都适用），最多 512 KiB。
+     *
+     * 真机 `logs_1795841499743` 证明「全屏预览拉整张 9 MB 原图」会在用户返回时取消数据段，
+     * 把相机逼进拒收命令的状态；因此 JPEG 预览也走这条有界读取。
+     * 默认退化为 [fetchRawPreview]，由实现类覆盖成真正的「按头部扫描」。
+     */
+    suspend fun fetchEmbeddedPreview(handle: Long): ByteArray? = fetchRawPreview(handle)
     /** Bounded to 4 MiB. Larger objects must use [streamObject]. */
     suspend fun fetchObject(handle: Long): ByteArray
     /** Synchronous payload sink: consume/copy length bytes before returning. */
