@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -41,6 +43,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -162,6 +165,8 @@ internal fun TetherGallery(
         Scaffold(
             modifier = Modifier.fillMaxSize(),
             containerColor = MiuixTheme.colorScheme.background,
+            // 顶栏自己吃掉状态栏 inset；内容铺到屏幕边缘，底部 inset 交给网格的 contentPadding，
+            // 这样滚动时缩略图会从系统导航栏下方经过，而不是被裁出一圈背景边。
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
             topBar = {
                 TopAppBar(
@@ -171,7 +176,6 @@ internal fun TetherGallery(
                     largeTitle = if (gallery.selectionMode) "已选 ${gallery.selectedHandles.size} 项" else "相机图库",
                     subtitle = subtitle,
                     scrollBehavior = scrollBehavior,
-                    defaultWindowInsetsPadding = false,
                     navigationIcon = {
                         IconButton(onClick = {
                             if (gallery.selectionMode) onAction(TetherUiAction.SetSelectionMode(false)) else onBack()
@@ -206,6 +210,8 @@ internal fun TetherGallery(
                 )
             },
         ) { paddingValues ->
+            val density = LocalDensity.current
+            val bottomInset = with(density) { WindowInsets.navigationBars.getBottom(density).toDp() }
             val sortIsDefault = gallery.sort == TetherGallerySort.CapturedDesc
             val showSummary = gallery.items.isNotEmpty() && (!sortIsDefault || !filtersAreDefault)
             // 头部（摘要胶囊 / 存储卡 / 目录 / 提示）作为网格第一行，随列表滚动，
@@ -282,7 +288,7 @@ internal fun TetherGallery(
                             .then(backdrop?.let { Modifier.layerBackdrop(it) } ?: Modifier)
                             .nestedScroll(scrollBehavior.nestedScrollConnection)
                             .overScrollVertical(),
-                        contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 12.dp),
+                        contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 6.dp, bottom = bottomInset + 12.dp),
                         horizontalArrangement = Arrangement.spacedBy(7.dp),
                         verticalArrangement = Arrangement.spacedBy(7.dp),
                     ) {
@@ -308,7 +314,7 @@ internal fun TetherGallery(
                 }
                 if (gallery.selectionMode) {
                     Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                        Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
@@ -324,7 +330,7 @@ internal fun TetherGallery(
                         )
                     }
                 } else {
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 12.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text("滤镜直出", style = MiuixTheme.textStyles.body2, color = MiuixTheme.colorScheme.onSurface)

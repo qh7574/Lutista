@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -28,6 +29,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -139,15 +142,54 @@ internal fun TetherPreview(state: TetherUiState, onAction: (TetherUiAction) -> U
             }
         }
         if (overlays) {
-            Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Color.Black.copy(alpha = .72f)).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            // 与其它页面统一：底部信息条改成 Miuix 表面色卡片 + Miuix 文字层级。
+            Column(
+                Modifier.align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+                    .background(MiuixTheme.colorScheme.surface)
+                    .navigationBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(media.name, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.MiddleEllipsis, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
-                    Text("${pager.currentPage + 1}/${mediaItems.size}", fontSize = 12.sp, color = Color.White)
+                    Text(
+                        media.name,
+                        Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.MiddleEllipsis,
+                        style = MiuixTheme.textStyles.subtitle,
+                        color = MiuixTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        "${pager.currentPage + 1}/${mediaItems.size}",
+                        style = MiuixTheme.textStyles.footnote1,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    )
                 }
-                Text(listOfNotNull(media.dimensions, media.sizeBytes?.let(::formatTetherBytes), media.capturedAt).joinToString(" · ").ifBlank { "正在读取文件信息…" }, fontSize = 11.sp, color = Color.LightGray)
-                if (media.kind == TetherMediaKind.Raw) Text("RAW · 内嵌预览 · 不支持编辑，可传输原图", fontSize = 12.sp, color = Color(0xFFFFB4AB))
-                Text(media.originalLabel(), fontSize = 12.sp, color = Color.LightGray)
-                (videoError ?: state.preview.error ?: media.error)?.let { Text(it, fontSize = 12.sp, color = Color(0xFFFFB4AB)) }
+                Text(
+                    listOfNotNull(media.dimensions, media.sizeBytes?.let(::formatTetherBytes), media.capturedAt)
+                        .joinToString(" · ").ifBlank { "正在读取文件信息…" },
+                    style = MiuixTheme.textStyles.footnote2,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                )
+                if (media.kind == TetherMediaKind.Raw) {
+                    Text(
+                        "RAW · 内嵌预览 · 不支持编辑，可传输原图",
+                        style = MiuixTheme.textStyles.footnote2,
+                        color = TetherPreviewWarning,
+                    )
+                }
+                if (media.originalStatus != TetherOriginalStatus.Downloaded) {
+                    Text(
+                        media.originalLabel(),
+                        style = MiuixTheme.textStyles.footnote2,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    )
+                }
+                (videoError ?: state.preview.error ?: media.error)?.let {
+                    Text(it, style = MiuixTheme.textStyles.footnote2, color = TetherPreviewError)
+                }
                 if (media.kind == TetherMediaKind.Video && state.preview.videoLocalUri != null) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TetherButton(if (videoPlaying) "暂停" else "播放", {
@@ -161,7 +203,11 @@ internal fun TetherPreview(state: TetherUiState, onAction: (TetherUiAction) -> U
                                 videoView?.seekTo(videoPosition.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
                                 onAction(TetherUiAction.SeekVideo(videoPosition))
                             }, modifier = Modifier.weight(1f), enabled = videoPrepared && videoDuration > 0)
-                        Text("${formatTetherTime(videoPosition)} / ${formatTetherTime(videoDuration)}", fontSize = 11.sp, color = Color.White)
+                        Text(
+                            "${formatTetherTime(videoPosition)} / ${formatTetherTime(videoDuration)}",
+                            style = MiuixTheme.textStyles.footnote2,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        )
                     }
                 }
                 TetherButton(
@@ -174,3 +220,7 @@ internal fun TetherPreview(state: TetherUiState, onAction: (TetherUiAction) -> U
         }
     }
 }
+
+/** 预览页提示色：RAW 琥珀、错误红，与原型一致。 */
+private val TetherPreviewWarning = Color(0xFFB26A00)
+private val TetherPreviewError = Color(0xFFD92C20)

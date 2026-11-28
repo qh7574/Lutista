@@ -12,8 +12,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -29,6 +30,12 @@ import androidx.compose.ui.unit.sp
 import cn.alittlecookie.lutista.ui.theme.getAppBarColor
 import cn.alittlecookie.lutista.ui.theme.lutistaBlurEffect
 import cn.alittlecookie.lutista.ui.theme.rememberLutistaBlurBackdrop
+import top.yukonga.miuix.kmp.basic.IconButton
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.SmallTopAppBar
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Back
+import top.yukonga.miuix.kmp.icon.extended.Info
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.LinearProgressIndicator
 import top.yukonga.miuix.kmp.basic.Scaffold
@@ -89,15 +96,29 @@ private fun TetherScreenContent(state: TetherUiState, onAction: (TetherUiAction)
             else -> requestBack()
         }
     }
-    Column(Modifier.fillMaxSize().background(MiuixTheme.colorScheme.background).safeDrawingPadding()) {
+    // 内容自己处理系统栏：让标题栏 / 取景画面自然延伸到状态栏与导航栏下方，
+    // 而不是整页统一 inset 后露出一圈背景色。
+    Column(Modifier.fillMaxSize().background(MiuixTheme.colorScheme.background)) {
         if (state.page == TetherPage.Preview) {
-            Row(Modifier.fillMaxWidth().lutistaBlurEffect(backdrop).background(barColor).padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TetherButton("返回", requestBack)
-                Text("文件预览", Modifier.weight(1f), fontSize = 19.sp,
-                    fontWeight = FontWeight.SemiBold, color = MiuixTheme.colorScheme.onSurface)
-                TetherButton("相机", { showCameraInfo = true })
-            }
+            // 全屏预览的顶栏与图库同款：Miuix 固定顶栏（卡片式图标按钮 + 大标题），
+            // 不再手拼文字按钮行。
+            val previewName = state.gallery.items.firstOrNull { it.handle == state.preview.handle }?.name
+            SmallTopAppBar(
+                title = "文件预览",
+                subtitle = previewName.orEmpty(),
+                modifier = Modifier.lutistaBlurEffect(backdrop),
+                color = barColor,
+                navigationIcon = {
+                    IconButton(onClick = requestBack) {
+                        Icon(MiuixIcons.Back, contentDescription = "返回")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { showCameraInfo = true }) {
+                        Icon(MiuixIcons.Info, contentDescription = "相机信息")
+                    }
+                },
+            )
         }
         Box(Modifier.weight(1f).fillMaxWidth().then(backdrop?.let { Modifier.layerBackdrop(it) } ?: Modifier)) {
             when (state.page) {
@@ -106,7 +127,9 @@ private fun TetherScreenContent(state: TetherUiState, onAction: (TetherUiAction)
                 TetherPage.LiveView -> TetherLiveView(state, onAction, requestExit)
             }
         }
-        state.backgroundConnectionNotice?.let { TetherNotice(it, Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) }
+        state.backgroundConnectionNotice?.let {
+            TetherNotice(it, Modifier.padding(horizontal = 12.dp, vertical = 4.dp).navigationBarsPadding())
+        }
     }
     TetherConnectionDialog(state.dialog, onAction)
     TetherTransferDialog(state.transfer, onAction)

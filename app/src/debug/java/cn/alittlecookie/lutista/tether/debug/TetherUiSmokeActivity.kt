@@ -16,7 +16,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -50,12 +51,14 @@ class TetherUiSmokeActivity : ComponentActivity() {
             else -> TetherPage.Gallery
         }
         val formatCase = intent.getStringExtra("formats")
-        setContent { LutistaTheme { SmokeContent(page, formatCase, ::finish) } }
+        // chrome=hide 时隐藏调试头，用来验证联机界面在真实（无外层 inset）宿主下的系统栏表现。
+        val showBanner = intent.getStringExtra("chrome") != "hide"
+        setContent { LutistaTheme { SmokeContent(page, formatCase, showBanner, ::finish) } }
     }
 }
 
 @Composable
-private fun SmokeContent(initialPage: TetherPage, formatCase: String?, finish: () -> Unit) {
+private fun SmokeContent(initialPage: TetherPage, formatCase: String?, showBanner: Boolean, finish: () -> Unit) {
     val image = remember { SmokeBitmapSource() }
     DisposableEffect(image) { onDispose { image.close() } }
     // 与真实仓库一致：排序/筛选读自 DataStore，改动也写回，用来验证跨会话记忆。
@@ -79,24 +82,30 @@ private fun SmokeContent(initialPage: TetherPage, formatCase: String?, finish: (
             state = state.copy(liveView = state.liveView.copy(recordingElapsedMillis = state.liveView.recordingElapsedMillis + 1000))
         }
     }
-    Column(Modifier.fillMaxSize().background(Color(0xFFFFF3CC)).safeDrawingPadding()) {
-        Text("模拟 UI · 无相机 / 无 USB / 不发送拍摄命令", Modifier.fillMaxWidth().padding(4.dp), color = Color(0xFF9B2222), fontSize = 12.sp)
-        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            listOf("图库" to TetherPage.Gallery, "取景" to TetherPage.LiveView, "预览" to TetherPage.Preview).forEach { (label, page) ->
-                Button(onClick = { state = state.copy(page = page) }, modifier = Modifier.weight(1f)) { Text("模拟$label", fontSize = 12.sp) }
-            }
-            Button(onClick = { state = state.copy(liveView = state.liveView.copy(isVideoMode = !state.liveView.isVideoMode)) }) { Text("照片/录像", fontSize = 11.sp) }
-        }
-        TetherScreen(state, onAction = { action ->
-            state = reduceSmoke(state, action)
-            when (action) {
-                is TetherUiAction.SetGallerySort -> scope.launch { settings.setTetherGallerySort(action.sort.name) }
-                is TetherUiAction.ToggleGalleryType -> scope.launch {
-                    settings.setTetherGalleryTypeMask(tetherGalleryTypeMask(state.gallery.types))
+    // 与 MainScreen 一致：联机界面自己处理系统栏 inset，外层不再统一 safeDrawingPadding，
+    // 否则取景/图库会被压出一圈背景边，测不出真实效果。
+    Column(Modifier.fillMaxSize()) {
+        if (showBanner) Column(Modifier.fillMaxWidth().background(Color(0xFFFFF3CC)).statusBarsPadding().padding(horizontal = 4.dp, vertical = 2.dp)) {
+            Text("模拟 UI · 无相机 / 无 USB / 不发送拍摄命令", Modifier.fillMaxWidth(), color = Color(0xFF9B2222), fontSize = 12.sp)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                listOf("图库" to TetherPage.Gallery, "取景" to TetherPage.LiveView, "预览" to TetherPage.Preview).forEach { (label, page) ->
+                    Button(onClick = { state = state.copy(page = page) }, modifier = Modifier.weight(1f)) { Text("模拟$label", fontSize = 12.sp) }
                 }
-                else -> Unit
+                Button(onClick = { state = state.copy(liveView = state.liveView.copy(isVideoMode = !state.liveView.isVideoMode)) }) { Text("照片/录像", fontSize = 11.sp) }
             }
-        }, onBack = finish)
+        }
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            TetherScreen(state, onAction = { action ->
+                state = reduceSmoke(state, action)
+                when (action) {
+                    is TetherUiAction.SetGallerySort -> scope.launch { settings.setTetherGallerySort(action.sort.name) }
+                    is TetherUiAction.ToggleGalleryType -> scope.launch {
+                        settings.setTetherGalleryTypeMask(tetherGalleryTypeMask(state.gallery.types))
+                    }
+                    else -> Unit
+                }
+            }, onBack = finish)
+        }
     }
 }
 

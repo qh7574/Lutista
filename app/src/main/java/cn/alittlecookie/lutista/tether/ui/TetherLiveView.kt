@@ -23,6 +23,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -110,6 +112,8 @@ internal fun TetherLiveView(
 ) {
     val live = state.liveView
     var picker by remember { mutableStateOf<LivePicker?>(null) }
+    // 取景是纯黑背景：状态栏 / 导航栏图标必须转成浅色，退出时恢复。
+    UseLightSystemBarIcons()
     BoxWithConstraints(modifier.fillMaxSize().background(Color.Black)) {
         val spec = TetherLayoutSpec.fromSize(maxWidth.value, maxHeight.value)
         if (spec.landscape) {
@@ -167,7 +171,7 @@ private fun LivePortrait(
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         Column(Modifier.fillMaxSize()) {
             Row(
-                Modifier.fillMaxWidth().height(56.dp).padding(start = 4.dp, end = 12.dp),
+                Modifier.fillMaxWidth().statusBarsPadding().height(56.dp).padding(start = 4.dp, end = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(onClick = { requestExit(TetherExitDestination.Back) }) {
@@ -270,7 +274,7 @@ private fun LivePortrait(
                 )
             }
             Row(
-                Modifier.fillMaxWidth().height(104.dp).padding(horizontal = 16.dp, vertical = 10.dp),
+                Modifier.fillMaxWidth().navigationBarsPadding().height(104.dp).padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 LiveSwitchColumn(state, onAction, Modifier.width(96.dp).fillMaxHeight())
@@ -882,6 +886,23 @@ private fun HideSystemBarsInLandscape() {
         controller?.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         controller?.hide(WindowInsetsCompat.Type.systemBars())
         onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()) }
+    }
+}
+
+/** 黑色取景界面：系统栏图标用浅色；离开取景时恢复调用前的取值。 */
+@Composable
+private fun UseLightSystemBarIcons() {
+    val view = LocalView.current
+    DisposableEffect(view) {
+        val controller = view.context.findActivity()?.window?.let { WindowCompat.getInsetsController(it, view) }
+        val previousStatus = controller?.isAppearanceLightStatusBars
+        val previousNavigation = controller?.isAppearanceLightNavigationBars
+        controller?.isAppearanceLightStatusBars = false
+        controller?.isAppearanceLightNavigationBars = false
+        onDispose {
+            if (previousStatus != null && controller != null) controller.isAppearanceLightStatusBars = previousStatus
+            if (previousNavigation != null && controller != null) controller.isAppearanceLightNavigationBars = previousNavigation
+        }
     }
 }
 
