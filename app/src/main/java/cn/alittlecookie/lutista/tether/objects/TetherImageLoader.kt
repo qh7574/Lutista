@@ -7,6 +7,7 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.media.MediaDataSource
 import android.media.MediaMetadataRetriever
+import androidx.core.net.toUri
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.scale
 import coil.ImageLoader
@@ -29,13 +30,20 @@ import java.io.File
 import java.io.IOException
 import okio.Buffer
 import okio.Path.Companion.toOkioPath
+import okio.buffer
+import okio.source
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import timber.log.Timber
 
 private val imageFetchPermits = Semaphore(2)
+
+/** 清晰大图同一时刻只允许一个下载：串行化既省 USB 带宽，也避免两条数据段互相干扰。 */
+private val fullJpegDownloadLock = Mutex()
 
 /** Includes both connection and storage: reconnecting must not reuse old handle pixels. */
 data class CameraThumbKey(
@@ -57,38 +65,23 @@ class CameraThumbFetcher(
     private val sourceProvider: () -> CameraObjectSource?,
     private val key: CameraThumbKey,
     private val options: Options,
+    private val previews: TetherPreviewCache,
+    private val localOriginal: (Long) -> String?,
 ) : Fetcher {
     override suspend fun fetch(): FetchResult? = imageFetchPermits.withPermit { fetchBounded() }
 
     private suspend fun fetchBounded(): FetchResult? {
         val source = sourceProvider() ?: throw IOException("Camera object source is disconnected")
         check(source.sessionKey == key.session) { "Camera image request belongs to an expired session" }
-        if (key.kind == CameraThumbKey.Kind.FULL_JPEG) {
-            val info = source.getObjectInfo(key.handle)
-            require(info.storageId == key.storageId && info.format == 0x3801L && !info.isDir) {
-                "Full image preview requires a JPEG from the requested storage"
-            }
-            // Temporary decoder input, not a disk cache. Original objects can be tens of MiB.
-            val file = File.createTempFile("tether-preview-", ".jpg", options.context.cacheDir)
-            var handedToDecoder = false
-            try {
-                file.outputStream().use { output ->
-                    source.streamObject(key.handle, { bytes, length -> output.write(bytes, 0, length) })
-                }
-                val result = SourceResult(
-                    source = ImageSource(file = file.toOkioPath(), closeable = Closeable { file.delete() }),
-                    mimeType = "image/jpeg", dataSource = DataSource.NETWORK,
-                )
-                handedToDecoder = true
-                return result
-            } finally {
-                if (!handedToDecoder) file.delete()
-            }
-        }
+        if (key.kind == CameraThumbKey.Kind.FULL_JPEG) return fullJpeg(source)
+        return embeddedPreviewResult(source)
+    }
+
+    /** 内嵌预览（缩略图或 RAW 的 1920 内嵌 JPEG）：≤4 MiB，一次性放进内存。 */
+    private suspend fun embeddedPreviewResult(source: CameraObjectSource): FetchResult? {
         val bytes = when (key.kind) {
-            CameraThumbKey.Kind.THUMB_160 -> thumbnailOrVideoFrame(source, key.handle)
             CameraThumbKey.Kind.RAW_PREVIEW_1920 -> source.fetchEmbeddedPreview(key.handle)
-            CameraThumbKey.Kind.FULL_JPEG -> error("Handled above")
+            CameraThumbKey.Kind.THUMB_160, CameraThumbKey.Kind.FULL_JPEG -> thumbnailOrVideoFrame(source, key.handle)
         } ?: return null
         check(bytes.size.toLong() <= PtpObjectSource.MAX_IN_MEMORY_BYTES) { "Camera preview exceeds 4 MiB" }
         return SourceResult(
@@ -96,6 +89,92 @@ class CameraThumbFetcher(
             mimeType = "image/jpeg", dataSource = DataSource.NETWORK,
         )
     }
+
+    /**
+     * 清晰大图（FULL_JPEG）：**本地原片 → 磁盘缓存 → 分块下载**。
+     *
+     * 三条路径都不会把相机留在数据段中途：
+     * - 本地原片：自动回传/手动下载过的图直接读本地文件，零 USB 流量；
+     * - 磁盘缓存：128 MiB / 7 天 LRU，第二次打开同一张图不再走 USB；
+     * - 分块下载：每块 512 KiB 一次独立 PTP 事务，取消只发生在事务边界。
+     */
+    private suspend fun fullJpeg(source: CameraObjectSource): FetchResult? {
+        val info = source.getObjectInfo(key.handle)
+        check(info.storageId == key.storageId) { "Full image preview requires the requested storage" }
+        if (info.isDir || info.format != 0x3801L) {
+            // 非 JPEG 没有「整份下载」之外的清晰路径，硬走会抛异常导致整张图空白；
+            // 降级成内嵌预览（RAW 的 1920 长边 JPEG）至少能看，且不额外占 USB 带宽。
+            Timber.tag(TAG_THUMB).d(
+                "整图预览降级为内嵌预览 handle=0x%x format=0x%x",
+                key.handle, info.format,
+            )
+            return embeddedPreviewResult(source)
+        }
+        val stamp = info.dateTakenRaw.hashCode().toLong()
+        val cacheKey = previews.keyOf(key, info.size, stamp)
+        localOriginal(key.handle)?.let { local ->
+            localSource(local)?.let {
+                Timber.tag(TAG_THUMB).v("整图预览命中本地原片 handle=0x%x", key.handle)
+                return it
+            }
+        }
+        previews.get(cacheKey)?.let { file ->
+            Timber.tag(TAG_THUMB).v("整图预览命中磁盘缓存 handle=0x%x file=%s", key.handle, file.name)
+            return fileResult(file)
+        }
+        return fileResult(downloadFullJpeg(source, cacheKey, info.size))
+    }
+
+    /** 同一时刻只允许一个大图下载：串行化既保护 USB 带宽，也避免两条数据段互相干扰。 */
+    private suspend fun downloadFullJpeg(source: CameraObjectSource, cacheKey: String, size: Long): File =
+        fullJpegDownloadLock.withLock {
+            previews.get(cacheKey)?.let { return@withLock it }
+            val temp = previews.tempFile(cacheKey)
+            val startedAt = System.nanoTime()
+            try {
+                var written = 0L
+                temp.outputStream().use { output ->
+                    written = source.streamObjectChunked(key.handle, size) { bytes -> output.write(bytes) }
+                }
+                check(written == size) { "整图预览下载不完整：$written/$size" }
+                val elapsed = (System.nanoTime() - startedAt) / 1_000_000
+                Timber.tag(TAG_THUMB).i(
+                    "整图预览下载完成 handle=0x%x bytes=%d elapsed=%dms",
+                    key.handle, written, elapsed,
+                )
+                previews.commit(temp, cacheKey)
+            } catch (cancel: CancellationException) {
+                temp.delete()
+                throw cancel
+            } catch (failure: Throwable) {
+                temp.delete()
+                throw failure
+            }
+        }
+
+    /** 本地原片可能是 SAF `content://` 文档，也可能是普通文件路径。 */
+    private fun localSource(local: String): FetchResult? = runCatching {
+        if (local.startsWith("content://")) {
+            val uri = local.toUri()
+            val stream = options.context.contentResolver.openInputStream(uri)
+                ?: throw IOException("无法读取本地原片：$local")
+            SourceResult(
+                source = ImageSource(source = stream.source().buffer(), context = options.context),
+                mimeType = "image/jpeg",
+                dataSource = DataSource.DISK,
+            )
+        } else {
+            val file = File(local)
+            if (!file.isFile) throw IOException("本地原片不存在：$local")
+            fileResult(file)
+        }
+    }.onFailure { Timber.tag(TAG_THUMB).w(it, "整图预览读取本地原片失败：%s", local) }.getOrNull()
+
+    private fun fileResult(file: File): FetchResult = SourceResult(
+        source = ImageSource(file = file.toOkioPath()),
+        mimeType = "image/jpeg",
+        dataSource = DataSource.DISK,
+    )
 
     /**
      * Some cameras answer GetThumb for movies with a broken payload or InvalidObjectHandle.
@@ -321,9 +400,13 @@ class CameraThumbFetcher(
         }
     }
 
-    class Factory(private val source: () -> CameraObjectSource?) : Fetcher.Factory<CameraThumbKey> {
+    class Factory(
+        private val source: () -> CameraObjectSource?,
+        private val previews: TetherPreviewCache,
+        private val localOriginal: (Long) -> String?,
+    ) : Fetcher.Factory<CameraThumbKey> {
         override fun create(data: CameraThumbKey, options: Options, imageLoader: ImageLoader): Fetcher =
-            CameraThumbFetcher(source, data, options)
+            CameraThumbFetcher(source, data, options, previews, localOriginal)
     }
 }
 
@@ -451,10 +534,16 @@ private class CameraCachePolicyInterceptor : Interceptor {
     override suspend fun intercept(chain: Interceptor.Chain): ImageResult {
         val key = chain.request.data as? CameraThumbKey ?: return chain.proceed(chain.request)
         val side = if (key.kind == CameraThumbKey.Kind.THUMB_160) 160 else 1920
+        // 缩略图与内嵌预览都进内存缓存；清晰大图不进池（一张 6000×4000 的 ARGB_565 约 46 MiB，
+        // 会瞬间把 12 MiB 的缩略图池挤空），但用内嵌预览当占位，重进时先出图再补清晰图，避免闪白。
+        val placeholderKey = key.copy(kind = CameraThumbKey.Kind.RAW_PREVIEW_1920).cacheKey
         val request = chain.request.newBuilder()
             .memoryCacheKey(key.cacheKey)
             .diskCachePolicy(CachePolicy.DISABLED)
-            .memoryCachePolicy(if (key.kind == CameraThumbKey.Kind.THUMB_160) CachePolicy.ENABLED else CachePolicy.DISABLED)
+            .memoryCachePolicy(
+                if (key.kind == CameraThumbKey.Kind.FULL_JPEG) CachePolicy.DISABLED else CachePolicy.ENABLED,
+            )
+            .placeholderMemoryCacheKey(if (key.kind == CameraThumbKey.Kind.FULL_JPEG) placeholderKey else null)
             .bitmapConfig(Bitmap.Config.RGB_565)
             .allowHardware(false)
             .build()
@@ -464,12 +553,17 @@ private class CameraCachePolicyInterceptor : Interceptor {
 }
 
 /** Coil 2.x gallery loader. Only small thumbnails share the bounded memory pool. */
-fun buildTetherImageLoader(context: Context, source: () -> CameraObjectSource?): ImageLoader =
+fun buildTetherImageLoader(
+    context: Context,
+    source: () -> CameraObjectSource?,
+    previews: TetherPreviewCache = TetherPreviewCache(File(context.cacheDir, "tether-previews")),
+    localOriginal: (Long) -> String? = { null },
+): ImageLoader =
     ImageLoader.Builder(context)
         .components {
             add(CameraCachePolicyInterceptor())
             add(CameraThumbKeyer())
-            add(CameraThumbFetcher.Factory(source))
+            add(CameraThumbFetcher.Factory(source, previews, localOriginal))
         }
         .memoryCache { MemoryCache.Builder(context).maxSizeBytes(12 * 1024 * 1024).build() }
         .diskCache(null)
@@ -482,7 +576,16 @@ fun ImageRequest.Builder.cameraThumb(key: CameraThumbKey): ImageRequest.Builder 
     data(key)
         .memoryCacheKey(key.cacheKey)
         .diskCachePolicy(CachePolicy.DISABLED)
-        .memoryCachePolicy(if (key.kind == CameraThumbKey.Kind.THUMB_160) CachePolicy.ENABLED else CachePolicy.DISABLED)
+        .memoryCachePolicy(
+            if (key.kind == CameraThumbKey.Kind.FULL_JPEG) CachePolicy.DISABLED else CachePolicy.ENABLED,
+        )
+        .placeholderMemoryCacheKey(
+            if (key.kind == CameraThumbKey.Kind.FULL_JPEG) {
+                key.copy(kind = CameraThumbKey.Kind.RAW_PREVIEW_1920).cacheKey
+            } else {
+                null
+            },
+        )
         .size(if (key.kind == CameraThumbKey.Kind.THUMB_160) 160 else 1920)
         .bitmapConfig(Bitmap.Config.RGB_565)
         .allowHardware(false)

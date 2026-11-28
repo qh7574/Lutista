@@ -63,6 +63,21 @@ interface CameraObjectSource {
     suspend fun fetchEmbeddedPreview(handle: Long): ByteArray? = fetchRawPreview(handle)
     /** Bounded to 4 MiB. Larger objects must use [streamObject]. */
     suspend fun fetchObject(handle: Long): ByteArray
+
+    /**
+     * 分块整份下载：每一块都是一次独立的 PTP 事务（`GetPartialObject`，≤512 KiB）。
+     *
+     * 这是「清晰大图」的安全通道：**取消只会发生在事务边界**，绝不会像整段 `GetObject`
+     * 那样把相机留在数据段中途（真机 logs_1795841499743 12:51 两次这样把相机逼死）。
+     * 默认实现退化为一次 [streamObject]，实现类应覆盖成分块循环。
+     *
+     * @return 实际读到的字节数；`< size` 说明对象在中途结束（相机侧异常）。
+     */
+    suspend fun streamObjectChunked(
+        handle: Long,
+        size: Long,
+        onChunk: (ByteArray) -> Unit,
+    ): Long = streamObject(handle, sink = { bytes, length -> onChunk(bytes.copyOf(length)) })
     /** Synchronous payload sink: consume/copy length bytes before returning. */
     suspend fun streamObject(
         handle: Long,

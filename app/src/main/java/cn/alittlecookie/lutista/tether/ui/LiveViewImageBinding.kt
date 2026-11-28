@@ -8,6 +8,8 @@ import java.lang.ref.WeakReference
 class LiveViewImageBinding(
     private val onFramePresented: (RenderedFrame) -> Unit = {},
 ) : TetherImageSource, AutoCloseable {
+    override val cacheIdentity: String = "liveview"
+
     private val views = mutableListOf<WeakReference<ImageView>>()
     private var current: RenderedFrame? = null
     private var presented: RenderedFrame? = null

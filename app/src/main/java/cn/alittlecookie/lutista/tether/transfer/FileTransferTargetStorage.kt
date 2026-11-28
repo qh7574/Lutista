@@ -26,6 +26,12 @@ class FileTransferTargetStorage(
         val target = uniqueFile(directory, safeFilename(info.name))
         val part = File(directory, target.name + ".part")
         val journal = journalFile(stateDirectory, key, kind)
+        // 上一次传输被打断（相机掉线/被杀）后，本目录会留下自己的 .part，而 journal 已在 abort/release 里删掉。
+        // 没有 journal 就没有可恢复的传输，这份 partial 只能清掉；否则每次重试都会因它立刻失败
+        // （真机 logs_1795847176992：P1028074 连续多次“开始传输”后瞬时失败，从未产生任何 USB 事务）。
+        if (part.exists() && !journal.exists() && !part.delete()) {
+            throw IOException("Cannot remove stale partial transfer")
+        }
         val properties = Properties().apply {
             setProperty("target", target.absolutePath)
             setProperty("partial", part.absolutePath)
@@ -73,6 +79,13 @@ class FileTransferTargetStorage(
             override fun close() { output.close() }
         }
     }
+
+    override suspend fun materializeOriginal(record: TransferRecord): String? = withContext(Dispatchers.IO) {
+        record.targetPath.takeIf { it.isNotBlank() && File(it).isFile }
+    }
+
+    override suspend fun committedOriginalExists(record: TransferRecord, targetPath: String): Boolean =
+        withContext(Dispatchers.IO) { targetPath.isNotBlank() && File(targetPath).isFile }
 
     override suspend fun recover(record: TransferRecord): DownloadedTransfer? = withContext(Dispatchers.IO) {
         val journal = journalFile(stateDirectory, record.key, record.kind)

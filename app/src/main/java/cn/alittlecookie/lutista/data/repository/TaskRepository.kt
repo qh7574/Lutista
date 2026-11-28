@@ -21,6 +21,16 @@ class TaskRepository(
 
     suspend fun updateStatus(id: Long, status: String) = taskDao.updateStatus(id, status)
 
+    suspend fun updateOutputPath(id: Long, outputPath: String) = taskDao.updateOutputPath(id, outputPath)
+
+    suspend fun updateTetherSource(
+        id: Long,
+        sourcePath: String,
+        originalSourcePath: String,
+        filterId: Long,
+        watermarkId: Long,
+    ) = taskDao.updateTetherSource(id, sourcePath, originalSourcePath, filterId, watermarkId)
+
     suspend fun updateProgress(id: Long, progress: Float) = taskDao.updateProgress(id, progress)
 
     suspend fun updateRetryCount(id: Long, count: Int) = taskDao.updateRetryCount(id, count)

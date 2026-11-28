@@ -51,6 +51,13 @@ interface TetherTaskSubmitter {
     suspend fun resolveEffects(): TetherEffects?
     /** Idempotent even if a process dies between task insert and transfer.taskId update. */
     suspend fun submit(key: String, downloaded: DownloadedTransfer, effects: TetherEffects): Long
+
+    /**
+     * 这张原片已经下载过、但还没有可用的滤镜成品时返回 true。
+     * 滤镜直出打开后，重复下载应当跳过 USB 传输、只补做一次处理并输出副本
+     * （用户 2026-11-28 明确要求；真机 logs_1795847176992 的历史任务没有成品落点）。
+     */
+    suspend fun processingRequired(key: String): Boolean = false
 }
 
 /** An output transaction must keep partial bytes invisible to ordinary image watchers.
@@ -69,6 +76,17 @@ interface TransferTargetStorage {
     suspend fun prepare(key: String, info: CameraObject, kind: TransferKind): TransferTarget
     /** Recover committed originals, or discard partials before a complete restart. */
     suspend fun recover(record: TransferRecord): DownloadedTransfer?
+
+    /** True when the committed original for [record] is still readable at [targetPath].
+     * The engine re-downloads an explicitly selected item whose destination file vanished;
+     * otherwise a stale DONE record would silently swallow the user's request. */
+    suspend fun committedOriginalExists(record: TransferRecord, targetPath: String): Boolean = true
+
+    /**
+     * 为「已经提交过、但本地暂存已清理」的原片返回一个可读的本地路径（SAF 文档会复制到缓存目录）。
+     * 用于跳过传输、直接补做滤镜直出。返回 null 表示无法提供可读副本。
+     */
+    suspend fun materializeOriginal(record: TransferRecord): String? = null
 
     /** Drop the private staging copy after the committed destination no longer needs it.
      * Implementations must keep [DownloadedTransfer.targetPath] intact and must be idempotent. */

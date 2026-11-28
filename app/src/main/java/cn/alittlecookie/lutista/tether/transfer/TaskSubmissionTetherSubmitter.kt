@@ -28,6 +28,8 @@ class TaskSubmissionTetherSubmitter(
         } catch (e: CancellationException) { throw e } catch (_: Exception) { 0L } else 0L
         return TetherEffects(filter, watermark).takeIf { it.valid }
     }
+    override suspend fun processingRequired(key: String): Boolean = submissions.tetherProductMissing(key)
+
     override suspend fun submit(key: String, downloaded: DownloadedTransfer, effects: TetherEffects): Long =
         submissions.submitTether(
             sourcePath = requireNotNull(downloaded.localPath), originalSourcePath = downloaded.targetPath,

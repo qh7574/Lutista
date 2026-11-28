@@ -38,6 +38,8 @@ internal class FakeObjectAccess : ObjectAccess {
     var thumbnail = byteArrayOf(1, 2, 3)
     var head = byteArrayOf()
     var partialFailure: Throwable? = null
+    /** 需要「按偏移返回切片」时分块下载用例用它，优先于 [head]。 */
+    var partialProvider: ((Long, Long, Long) -> PtpData)? = null
     var partialCode = PtpConstants.Rc.OK
     var thumbCode = PtpConstants.Rc.OK
     var thumbReads = 0
@@ -63,6 +65,7 @@ internal class FakeObjectAccess : ObjectAccess {
         partialLength = length
         partialOffset = offset
         partialFailure?.let { throw it }
+        partialProvider?.let { return it(handle, offset, length) }
         return PtpData(PtpResponse(partialCode), head)
     }
     override suspend fun stream(handle: Long, sink: (ByteArray, Int) -> Unit): PtpResponse {

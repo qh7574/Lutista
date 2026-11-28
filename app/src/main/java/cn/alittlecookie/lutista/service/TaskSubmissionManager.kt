@@ -24,6 +24,12 @@ class TaskSubmissionManager(
     private val logger: LogManager,
     private val settingsManager: SettingsManager,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
+    /**
+     * 判断成品是否真的还在。数据库里 COMPLETED + outputPath 只代表「当时写成功过」，
+     * 用户删文件、换输出文件夹之后这条记录会撒谎（真机 logs_1795851337338：P1028082 明明
+     * 没有成品，任务却是 COMPLETED，重新下载时被直接跳过）。
+     */
+    private val productProbe: (String) -> Boolean = { path -> path.isNotBlank() && java.io.File(path).isFile },
 ) {
     companion object {
         private const val TAG = "TaskSubmissionManager"
@@ -41,7 +47,23 @@ class TaskSubmissionManager(
 
     val cancelFlagMap = ConcurrentHashMap<Long, AtomicBoolean>()
     private val pauseFlag = AtomicBoolean(false)
+    /** 已进入 taskQueue、尚未被 worker 取走的任务 id（防止重复排队生成两份成品）。 */
+    private val queuedTaskIds = mutableSetOf<Long>()
     private val isProcessing = AtomicBoolean(false)
+
+    /**
+     * 同一任务只允许在队列里存在一份（否则会生成两份成品）。调用方必须持有 [mutex]。
+     * 取消标记为 true 表示上一轮已被取消，可以重新排队。
+     */
+    private fun enqueueLocked(task: TaskEntity): Boolean {
+        if (queuedTaskIds.contains(task.id)) return false
+        val existingFlag = cancelFlagMap[task.id]
+        if (existingFlag != null && !existingFlag.get()) return false
+        cancelFlagMap[task.id] = AtomicBoolean(false)
+        queuedTaskIds += task.id
+        taskQueue.add(task.copy(status = TaskStatus.PENDING.name))
+        return true
+    }
 
     init {
         scope.launch {
@@ -53,11 +75,7 @@ class TaskSubmissionManager(
                         it.source == TaskSource.TETHER.name && it.status in RECOVERABLE_STATUSES
                     }
                     for (task in interrupted) {
-                        mutex.withLock {
-                            if (cancelFlagMap.putIfAbsent(task.id, AtomicBoolean(false)) == null) {
-                                taskQueue.add(task.copy(status = TaskStatus.PENDING.name))
-                            }
-                        }
+                        mutex.withLock { enqueueLocked(task) }
                     }
                     if (interrupted.isNotEmpty()) startProcessing()
                 }
@@ -94,7 +112,7 @@ class TaskSubmissionManager(
         val taskWithId = task.copy(id = taskId)
 
         mutex.withLock {
-            taskQueue.add(taskWithId)
+            enqueueLocked(taskWithId)
         }
 
         cancelFlagMap[taskId] = AtomicBoolean(false)
@@ -129,13 +147,32 @@ class TaskSubmissionManager(
             it.source == TaskSource.TETHER.name && it.submissionKey == submissionKey
         }
         if (existing != null) {
-            // A process may die after the insert but before the in-memory enqueue.
-            if (existing.status in RECOVERABLE_STATUSES) {
+            // 真机 logs_1795847176992：历史任务（早于成品落点持久化）状态是 COMPLETED 但
+            // outputPath 为空，滤镜直出打开后重新下载同一张图会命中这里直接返回旧 id，
+            // 既不处理也不校验成品 —— 用户看到的就是「开了滤镜直出却没有成品」。
+            // 因此：可恢复状态照旧重新排队；COMPLETED 但没有成品落点记录的旧任务也重跑一次，
+            // 并在重跑时刷新暂存原件路径（上一次传输的 staging 可能已被清理）。
+            val productMissing = productAbsent(existing)
+            if (existing.status in RECOVERABLE_STATUSES || productMissing) {
+                if (existing.sourcePath != sourcePath || existing.originalSourcePath != originalSourcePath ||
+                    existing.filterId != filterId || existing.watermarkId != watermarkId
+                ) {
+                    taskRepository.updateTetherSource(
+                        existing.id, sourcePath, originalSourcePath, filterId, watermarkId,
+                    )
+                }
                 mutex.withLock {
-                    if (!cancelFlagMap.containsKey(existing.id)) {
-                        cancelFlagMap[existing.id] = AtomicBoolean(false)
-                        taskQueue.add(existing.copy(status = TaskStatus.PENDING.name))
-                    }
+                    // 同一个任务既不能重复排队（会生成两份成品），也不能因为「上一轮的取消标记
+                    // 还没清掉」而永远不再重排（真机曾出现只提交不处理）。
+                    enqueueLocked(
+                        existing.copy(
+                            sourcePath = sourcePath,
+                            originalSourcePath = originalSourcePath,
+                            filterId = filterId,
+                            watermarkId = watermarkId,
+                            outputPath = "",
+                        )
+                    )
                 }
                 startProcessing()
             }
@@ -147,13 +184,30 @@ class TaskSubmissionManager(
             priority = 1, source = TaskSource.TETHER.name
         )
         val id = taskRepository.insert(task)
-        mutex.withLock {
-            cancelFlagMap[id] = AtomicBoolean(false)
-            taskQueue.add(task.copy(id = id))
-        }
+        mutex.withLock { enqueueLocked(task.copy(id = id)) }
         logger.i(TAG, "任务已提交: $id, 来源: TETHER, 原始路径: $originalSourcePath")
         startProcessing()
         id
+    }
+
+    /**
+     * 「这张原片已经有成品了吗」：滤镜直出打开时，若原片已在本地，引擎会跳过 USB 传输，
+     * 但仍要为它补做一次处理（用户要求）。没有任务记录、任务未完成、或没有成品落点
+     * （早于落点持久化的历史任务）都算「需要处理」。
+     */
+    suspend fun tetherProductMissing(submissionKey: String): Boolean {
+        val existing = taskRepository.getAllTasks().first().firstOrNull {
+            it.source == TaskSource.TETHER.name && it.submissionKey == submissionKey
+        } ?: return true
+        return existing.status != TaskStatus.COMPLETED.name || productAbsent(existing)
+    }
+
+    /** 成品缺失：没有落点记录，或者记录的文件已经不在了。 */
+    private fun productAbsent(task: TaskEntity): Boolean {
+        if (task.status != TaskStatus.COMPLETED.name) return true
+        val path = task.outputPath
+        if (path.isBlank()) return true
+        return !runCatching { productProbe(path) }.getOrDefault(false)
     }
 
     private fun startProcessing() {
@@ -166,7 +220,10 @@ class TaskSubmissionManager(
                 }
 
                 val task = mutex.withLock {
-                    taskQueue.poll().also { if (it == null) isProcessing.set(false) }
+                    taskQueue.poll().also { polled ->
+                        if (polled != null) queuedTaskIds -= polled.id
+                        if (polled == null) isProcessing.set(false)
+                    }
                 } ?: return@launch
 
                 if (isTaskCancelled(task.id)) {
@@ -182,7 +239,7 @@ class TaskSubmissionManager(
                     try {
                         taskRepository.updateStatus(task.id, TaskStatus.PROCESSING.name)
 
-                        imageProcessingService.processImage(task) { progress ->
+                        val outputPath = imageProcessingService.processImage(task) { progress ->
                             if (isTaskCancelled(task.id)) {
                                 throw CancellationException("任务被取消")
                             }
@@ -192,6 +249,7 @@ class TaskSubmissionManager(
                         }
 
                         success = true
+                        if (outputPath.isNotBlank()) taskRepository.updateOutputPath(task.id, outputPath)
                         taskRepository.completeTask(task.id, TaskStatus.COMPLETED.name)
                         settingsManager.incrementProcessedCount()
                         logger.i(TAG, "任务完成: ${task.id}")

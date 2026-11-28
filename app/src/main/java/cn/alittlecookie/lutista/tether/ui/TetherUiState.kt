@@ -5,6 +5,15 @@ import android.widget.ImageView
 
 /** A view-only binding. Attach/detach must never start/stop a camera session or change its format. */
 interface TetherImageSource {
+    /**
+     * 同一张图在多次状态发射之间保持稳定的身份。
+     *
+     * Repository 每次状态发射都会新建 [TetherImage]（以及旧的绑定对象），因此不能按对象身份判断
+     * 「是不是同一张图」——那样每次重组都会 detach（清空 ImageView）再 attach，用户看到的就是
+     * 全屏预览闪烁 + 重复走 USB。见 [app/src/main/java/cn/alittlecookie/lutista/tether/ui/TetherUiComponents.kt]。
+     */
+    val cacheIdentity: String
+
     fun attach(view: ImageView)
     fun detach(view: ImageView)
 }
@@ -236,6 +245,8 @@ sealed interface TetherUiAction {
     data class Download(val handles: Set<Long>) : TetherUiAction
     data object CancelTransfer : TetherUiAction
     data object RetryFailedTransfers : TetherUiAction
+    /** 关掉「下载结果」对话框（只在批次已经结束或有失败时可用）。 */
+    data object DismissTransferSummary : TetherUiAction
     data class SetParameter(val key: TetherParameterKey, val value: Long) : TetherUiAction
     data class SetPhotoStyle(val value: Long) : TetherUiAction
     data object RestorePhotoStyle : TetherUiAction

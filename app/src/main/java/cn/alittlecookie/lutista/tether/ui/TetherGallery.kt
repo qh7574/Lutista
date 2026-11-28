@@ -150,17 +150,21 @@ internal fun TetherGallery(state: TetherUiState, onAction: (TetherUiAction) -> U
             Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
                     "原片 → 主页「输入文件夹」；滤镜直出成品 → 主页「输出文件夹」。",
-                    fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    style = MiuixTheme.textStyles.footnote2,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("滤镜直出", fontSize = 12.sp, color = MiuixTheme.colorScheme.onSurface)
+                        Text("滤镜直出", style = MiuixTheme.textStyles.body2, color = MiuixTheme.colorScheme.onSurface)
                         Text(
                             if (state.directFilter) "回传或手动下载的原片，都会按主页全局滤镜/签名另存一张成品到主页输出文件夹（相册立即可见）。"
                             else "只回传相机原片，不套滤镜，也不会让主页重复处理。",
-                            fontSize = 10.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                            style = MiuixTheme.textStyles.footnote2,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                         )
-                        state.directFilterReason?.let { Text(it, fontSize = 10.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary) }
+                        state.directFilterReason?.let {
+                            Text(it, style = MiuixTheme.textStyles.footnote2, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                        }
                     }
                     Switch(checked = state.directFilter, onCheckedChange = { onAction(TetherUiAction.SetDirectFilter(it)) })
                 }

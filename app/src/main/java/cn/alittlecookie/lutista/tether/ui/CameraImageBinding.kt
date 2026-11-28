@@ -17,6 +17,8 @@ class CameraImageBinding(
 ) : TetherImageSource {
     private val requests = WeakHashMap<ImageView, Disposable>()
 
+    override val cacheIdentity: String = key.cacheKey
+
     override fun attach(view: ImageView) {
         requests.remove(view)?.dispose()
         requests[view] = loader.enqueue(
@@ -26,6 +28,8 @@ class CameraImageBinding(
 
     override fun detach(view: ImageView) {
         requests.remove(view)?.dispose()
-        view.setImageDrawable(null)
+        // 缩略图可以立刻清空，重建成本极低；清晰大图/内嵌预览保留上一帧，
+        // 等新请求出图再替换，避免「清空 → 白屏 → 再出图」的闪烁。
+        if (key.kind == CameraThumbKey.Kind.THUMB_160) view.setImageDrawable(null)
     }
 }

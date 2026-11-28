@@ -168,9 +168,12 @@ class TaskSubmissionManagerTest {
             coEvery { processor.processImage(any(), any()) } coAnswers {
                 processed.send(firstArg<TaskEntity>())
                 processingGate?.await()
-                Unit
+                outputPath
             }
         }
+
+        /** processImage 现在返回成品落点；测试里用一个固定值代表「确实产出了成品」。 */
+        var outputPath: String = "/storage/emulated/0/Pictures/Lutista/OUT.jpg"
 
         fun start() = TaskSubmissionManager(repository, processor, logger, settings, scope)
 

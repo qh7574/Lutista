@@ -181,6 +181,8 @@ private fun reduceSmoke(state: TetherUiState, action: TetherUiAction): TetherUiS
 
 /** Clears every borrowed ImageView before recycling the single owner bitmap, including rotation. */
 private class SmokeBitmapSource : TetherImageSource, AutoCloseable {
+    override val cacheIdentity: String = "smoke"
+
     private val views = mutableListOf<WeakReference<ImageView>>()
     private var bitmap: Bitmap? = Bitmap.createBitmap(640, 432, Bitmap.Config.ARGB_8888).also { bitmap ->
         val canvas = Canvas(bitmap)

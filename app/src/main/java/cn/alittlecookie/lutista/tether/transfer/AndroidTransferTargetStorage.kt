@@ -3,6 +3,7 @@ package cn.alittlecookie.lutista.tether.transfer
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.net.Uri
+import androidx.core.net.toUri
 import android.os.Environment
 import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
@@ -18,6 +19,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.util.Properties
+import timber.log.Timber
 
 /** Ordinary directories and persisted SAF trees share the same transactional contract.
  * SAF uses a durable local original (not cache); processing/EXIF never gets a content URI as File.
@@ -56,6 +58,10 @@ class AndroidTransferTargetStorage(
         val local = File(sourceDirectory, name)
         val part = File(sourceDirectory, name + ".part")
         val journal = FileTransferTargetStorage.journalFile(stateRoot, key, kind)
+        // 同 FileTransferTargetStorage：上一次被打断的传输会留下私有 .part，journal 已随 abort 消失。
+        if (part.exists() && !journal.exists() && !part.delete()) {
+            throw IOException("Cannot remove stale SAF staging partial")
+        }
         val properties = Properties().apply {
             setProperty("type", "saf"); setProperty("partial", part.absolutePath)
             setProperty("local", local.absolutePath); setProperty("size", info.size.toString())
@@ -125,20 +131,32 @@ class AndroidTransferTargetStorage(
         val local = properties.getProperty("local")?.let(::File)
         val uri = properties.getProperty("safUri")?.let(Uri::parse)
         val format = properties.getProperty("format")?.toLongOrNull()
+        val committedSize = uri?.let { documentSize(context, it) }
         if (local?.isFile == true && local.length() == record.size && uri != null &&
-            documentSize(context, uri) == record.size && (format != 0x3801L || isDecodableJpeg(local))) {
+            committedSize == record.size && (format != 0x3801L || isDecodableJpeg(local))) {
             properties.getProperty("reservation")?.let { suppression.complete(it, uri.toString(), record.size) }
             return@safIo DownloadedTransfer(uri.toString(), local.absolutePath, record.size)
         }
-        if (uri != null) {
+        // 只有「尺寸确定且与预期不符」才认定文档不完整并删除；尺寸读不出来时保留用户可见的原片。
+        // 真机 logs_1795845419086 出现过场景：输入文件夹里的原片被判定缺失，界面上却仍显示已下载。
+        if (uri != null && committedSize != null && committedSize != record.size) {
             val doc = DocumentFile.fromSingleUri(context, uri)
             if (doc?.exists() == true && !doc.delete()) throw IOException("Cannot remove interrupted SAF output")
+        } else if (uri != null && committedSize == null) {
+            Timber.w("TetherTransfer: 无法确认 SAF 原片尺寸，保留不删除：%s", uri)
         }
         properties.getProperty("partial")?.let(::File)?.let { if (it.exists() && !it.delete()) throw IOException("Cannot clean SAF partial") }
         local?.delete()
         properties.getProperty("reservation")?.let(suppression::release)
         journal.delete()
         null
+    }
+
+    override suspend fun committedOriginalExists(record: TransferRecord, targetPath: String): Boolean = safIo {
+        if (targetPath.isBlank()) return@safIo false
+        if (!targetPath.startsWith("content://")) return@safIo File(targetPath).isFile
+        runCatching { context.contentResolver.openInputStream(targetPath.toUri())?.use { true } ?: false }
+            .getOrElse { false }
     }
 
     override suspend fun release(record: TransferRecord, downloaded: DownloadedTransfer) = safIo {
@@ -232,10 +250,18 @@ class AndroidTransferTargetStorage(
             }
             throw IOException("Cannot allocate a unique SAF output name")
         }
-        private fun documentSize(context: Context, uri: Uri): Long? =
+        private fun documentSize(context: Context, uri: Uri): Long? = runCatching {
             context.contentResolver.query(uri, arrayOf(DocumentsContract.Document.COLUMN_SIZE), null, null, null)?.use {
                 if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else null
             }
+        }.getOrElse { failure ->
+            // 真机 logs_1795849430417：用户在主页改了输入文件夹后，旧 journal 里的 SAF 文档
+            // 不再属于当前 tree，SAF 会抛「Failed to determine if primary:… is child of …」。
+            // 这里只把尺寸当成「读不出来」，由调用方按「无法确认 → 保留用户文件、丢弃孤儿
+            // journal 后重新下载」处理，绝不把这条 SAF 内部错误当成传输失败抛给界面。
+            Timber.w(failure, "TetherTransfer: 读取 SAF 文档尺寸失败（可能是输入文件夹已更换）：%s", uri)
+            null
+        }
         private fun queryAvailableBytes(context: Context, tree: Uri): Long? {
             return try {
             val authority = tree.authority ?: return null

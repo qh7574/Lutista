@@ -47,6 +47,13 @@ class TetherRepository(
     val uiState: StateFlow<TetherUiState> = mutableUi.asStateFlow()
     private val mutablePreviewNotices = MutableSharedFlow<PreviewRenderNotice>(extraBufferCapacity = 1)
     val previewNotices: SharedFlow<PreviewRenderNotice> = mutablePreviewNotices.asSharedFlow()
+
+    /**
+     * 一次性 Toast 文案（例如「跳过已下载图片 3 张，处理滤镜 5 张」）。
+     * 联机界面只负责显示，不参与决策：批次统计在传输层算好，避免 UI 猜。
+     */
+    private val mutableNotices = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val notices: SharedFlow<String> = mutableNotices.asSharedFlow()
     val enabled: StateFlow<Boolean> = settings.tetherEnabled
     private var enableJob: Job? = null
     private val serviceLease = ForegroundServiceLease()
@@ -76,14 +83,20 @@ class TetherRepository(
     private var previewRenderingFailed = false
     private var originalStyle: Long? = null
     private val mediaProgress = mutableMapOf<Long, TetherTransferItemUi>()
-    private val originalPaths = mutableMapOf<Long, String>()
+    // Coil 的解码线程会读这张表（清晰大图优先读本地原片），所以必须是并发容器。
+    private val originalPaths = ConcurrentHashMap<Long, String>()
     private val localOriginalPaths = mutableMapOf<Long, String>()
     private data class QueuedObjectEvent(
         val registration: SessionEventBarrier.Registration<PtpUsbDriver, CameraObjectSource>,
         val event: EventPump.ObjectAdded,
     )
     private val eventQueue = Channel<QueuedObjectEvent>(64)
-    private val loader = buildTetherImageLoader(context) { source }
+    private val imageBindings = ConcurrentHashMap<String, CameraImageBinding>()
+    private val loader = buildTetherImageLoader(
+        context = context,
+        source = { source },
+        localOriginal = { handle -> originalPaths[handle] },
+    )
     private var lastPreviewRequest = Long.MIN_VALUE
 
     init {
@@ -303,6 +316,7 @@ class TetherRepository(
                     autoReconciler = AutoTransferReconciler(key)
                     driver.bindObjectSource(current)
                     mediaProgress.clear(); originalPaths.clear(); localOriginalPaths.clear(); originalStyle = null
+                    imageBindings.clear()
                     check(eventBarrier.publish(window, driver, current)) { "相机会话已关闭" }
                     settings.setTetherLastCameraModel(device.model)
                     update { it.copy(cameraName = device.model, cameraDetails = "${device.manufacturer} · ${device.deviceVersion}",
@@ -504,6 +518,9 @@ class TetherRepository(
             TetherUiAction.DismissClockWarning -> updateGallery { it.copy(clockWarning = null) }
             is TetherUiAction.Download -> launchAction { download(action.handles) }
             TetherUiAction.CancelTransfer -> launchAction { transfers.cancelForeground() }
+            TetherUiAction.DismissTransferSummary -> update {
+                it.copy(transfer = it.transfer.copy(active = false, error = null, items = emptyList()))
+            }
             TetherUiAction.RetryFailedTransfers -> launchAction { download(mediaProgress.values.filter { it.error != null }.mapTo(linkedSetOf()) { it.handle }) }
             is TetherUiAction.SetParameter -> launchAction { writeProperty(parameterId(action.key), action.value) }
             is TetherUiAction.SetPhotoStyle -> launchAction { writeProperty(CameraProperty.PHOTO_STYLE, action.value) }
@@ -668,8 +685,19 @@ class TetherRepository(
         val current = source ?: error("请先连接相机")
         val selected = handles.map { findObject(it).toCameraObject() }
         require(selected.isNotEmpty()) { "请先选择文件" }
-        transfers.enqueueManual(current.sessionKey, selected)
+        val summary = transfers.enqueueManual(current.sessionKey, selected)
+        announceManualDownload(summary)
     }
+    /** 重复下载时给一句确定的话：跳过几张、几张会出成品。没有可说的就不打扰用户。 */
+    private fun announceManualDownload(summary: ManualEnqueueSummary) {
+        if (summary.isEmpty) return
+        val parts = buildList {
+            if (summary.skipped > 0) add("跳过已下载图片 ${summary.skipped} 张")
+            if (summary.processed > 0) add("处理滤镜 ${summary.processed} 张")
+        }
+        mutableNotices.tryEmit(parts.joinToString("，"))
+    }
+
     private suspend fun loadVideo(handle: Long) {
         val path = originalPaths[handle] ?: error("视频需先手动下载原片，再从本地播放")
         update { it.copy(preview = it.preview.copy(videoLocalUri = path, videoPlaying = true)) }
@@ -681,18 +709,22 @@ class TetherRepository(
             entity.name.endsWith(".rw2", true) || entity.name.endsWith(".raw", true) -> TetherMediaKind.Raw
             entity.name.endsWith(".mov", true) || entity.name.endsWith(".mp4", true) -> TetherMediaKind.Video
             else -> TetherMediaKind.Unknown }
-        // 全屏预览一律用相机内嵌的 1920 预览，**不再**整张拉取原图。
-        // [CameraThumbKey.Kind.FULL_JPEG] 会把整个文件（真机 ~9 MB）流进临时文件，而 Coil 会在
-        // 用户按返回/滑动换图时于数据段中途取消它：真机 logs_1795841499743 12:51:14 与 12:51:20
-        // 两次都是这样把相机逼进「下一条 24 字节命令 bulk OUT 直接 -1」的状态，用户看到
-        // 「USB 已断开」。GetPartialObject 只读文件头 512 KiB，代价与风险都小得多。
-        val previewKind = CameraThumbKey.Kind.RAW_PREVIEW_1920
+        // 全屏预览用清晰的 [CameraThumbKey.Kind.FULL_JPEG]，但走的是「本地原片 → 磁盘缓存 →
+        // 512 KiB 分块下载」三段式（见 [CameraThumbFetcher.fullJpeg]）：
+        // - 内嵌预览只有 EXIF 缩略图级别（真机实测 GetPartialObject 头部只有 ~160×120），全屏看很糊；
+        // - 分块下载每块一次独立事务，取消只发生在事务边界，不会再像整文件
+        //   streamObject 那样在数据段中途撒手（真机 logs_1795841499743 12:51:14/12:51:20 的
+        //   「下一条 24 字节命令 bulk OUT 直接 -1」就是这么来的）。
+        // 只有 JPEG 有「整份下载」这条清晰预览路径；RAW（RW2）与视频没有，硬走 FULL_JPEG 会让
+        // CameraThumbFetcher 的格式校验抛异常（真机 logs_1795845419086：RW2 大图预览空白）。
+        // RAW 的最清晰可用画质就是它内嵌的 1920 长边 JPEG（fetchEmbeddedPreview 只读头部 512 KiB）。
+        val previewKind = previewKindFor(kind)
         val progress = mediaProgress[entity.handle]
         return TetherMediaUi(entity.handle, entity.name, kind, entity.storageId, entity.parent, true, entity.size,
             capturedAt = entity.dateTaken.takeIf(String::isNotBlank), durationLabel = entity.durationMs?.let { "${it / 60000}:${(it / 1000 % 60).toString().padStart(2, '0')}" },
-            thumbnail = TetherImage(source = CameraImageBinding(context, loader, CameraThumbKey(current.sessionKey, entity.storageId, entity.handle))),
-            preview = TetherImage(source = CameraImageBinding(context, loader, CameraThumbKey(current.sessionKey, entity.storageId, entity.handle,
-                if (kind == TetherMediaKind.Video) CameraThumbKey.Kind.THUMB_160 else previewKind))),
+            thumbnail = TetherImage(source = imageBinding(CameraThumbKey(current.sessionKey, entity.storageId, entity.handle))),
+            preview = TetherImage(source = imageBinding(CameraThumbKey(current.sessionKey, entity.storageId, entity.handle,
+                previewKind))),
             originalStatus = when { progress?.completed == true -> TetherOriginalStatus.Downloaded
                 progress?.error != null -> TetherOriginalStatus.Failed
                 progress != null -> TetherOriginalStatus.Downloading
@@ -730,7 +762,8 @@ class TetherRepository(
             val committed = states.lastOrNull { it.state in committedTransferStates }
             val item = committed ?: states.last()
             val fraction = if (item.totalBytes > 0) (item.bytesDone.toDouble() / item.totalBytes).toFloat().coerceIn(0f, 1f) else 0f
-            mediaProgress[handle] = TetherTransferItemUi(handle, item.name, fraction, committed != null, item.error)
+            mediaProgress[handle] = TetherTransferItemUi(handle, item.name, fraction, committed != null,
+                friendlyTransferError(item.error))
             committed?.targetPath?.takeIf(String::isNotBlank)?.let { originalPaths[handle] = it }
         }
         val batch = selectedBatch(batches)
@@ -745,6 +778,19 @@ class TetherRepository(
             totalBytes = batch?.totalBytes ?: progress.totalBytes,
             error = progress.error),
             gallery = it.gallery.copy(items = visibleEntities.map(::media))) }
+    }
+
+    /**
+     * 用户改过输入文件夹后，旧 SAF 文档会抛「Failed to determine if primary:… is child of …」。
+     * 这条信息只有调试价值，界面要显示的是「原片已不在输入文件夹，正在重新下载」。
+     */
+    private fun friendlyTransferError(message: String?): String? {
+        if (message.isNullOrBlank()) return null
+        return when {
+            message.contains("Failed to determine if") || message.contains("Missing file for") ->
+                "输入文件夹里找不到这张原片（可能改过输入文件夹），正在重新下载"
+            else -> message
+        }
     }
 
     /** Prefer the newest still-running batch; after it settles keep its final counters visible. */
@@ -827,9 +873,18 @@ class TetherRepository(
         withTimeout(5_000) { lease.stopped.await() }
     }
 
+
+    /**
+     * 复用同 `cacheKey` 的图片绑定：Coil 的请求、WeakHashMap<ImageView, Disposable> 都挂在绑定上，
+     * 每次状态发射新建绑定会让 [BoundTetherImageView] 误判换图并重新发起请求（重复加载 + 闪烁）。
+     */
+    private fun imageBinding(key: CameraThumbKey): CameraImageBinding =
+        imageBindings.computeIfAbsent(key.cacheKey) { CameraImageBinding(context, loader, key) }
+
     private suspend fun clearSession(old: CameraObjectSource?) {
         visibleEntities = emptyList(); previewEntity = null
         mediaProgress.clear(); originalPaths.clear(); localOriginalPaths.clear(); originalStyle = null
+        imageBindings.clear()
         autoReconciler = null
         pageLimit.value = 100
         galleryFilter.value = null to null
@@ -852,4 +907,16 @@ class TetherRepository(
     private inline fun update(transform: (TetherUiState) -> TetherUiState) { mutableUi.update(transform) }
     private inline fun updateGallery(transform: (TetherGalleryUi) -> TetherGalleryUi) { update { it.copy(gallery = transform(it.gallery)) } }
     private inline fun updateLive(transform: (TetherLiveViewUi) -> TetherLiveViewUi) { update { it.copy(liveView = transform(it.liveView)) } }
+}
+
+/**
+ * 全屏预览用哪种取图方式：
+ * - JPEG 有整份下载的清晰路径（本地原片 → 磁盘缓存 → 512 KiB 分块下载）；
+ * - RAW（RW2）没有，最清晰的就是它内嵌的 1920 长边 JPEG；
+ * - 视频只有首帧缩略图。
+ */
+internal fun previewKindFor(kind: TetherMediaKind): CameraThumbKey.Kind = when (kind) {
+    TetherMediaKind.Jpeg -> CameraThumbKey.Kind.FULL_JPEG
+    TetherMediaKind.Raw -> CameraThumbKey.Kind.RAW_PREVIEW_1920
+    TetherMediaKind.Video, TetherMediaKind.Unknown -> CameraThumbKey.Kind.THUMB_160
 }

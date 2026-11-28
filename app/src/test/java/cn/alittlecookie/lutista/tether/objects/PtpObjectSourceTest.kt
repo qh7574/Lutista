@@ -5,6 +5,7 @@ import cn.alittlecookie.lutista.tether.protocol.PtpConstants
 import cn.alittlecookie.lutista.tether.session.PtpData
 import cn.alittlecookie.lutista.tether.transport.PtpResponse
 import java.io.IOException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -297,5 +298,63 @@ class PtpObjectSourceTest {
         assertEquals(0, access.streamCalls)
         access.infos = mapOf(1L to objectInfo(size = 4))
         try { source(access).fetchObject(1); fail("Wrong object length accepted") } catch (_: IllegalStateException) { }
+    }
+
+    @Test fun chunkedDownloadReadsSequentialWindowsNoBiggerThanHalfAMegabyte() = runBlocking {
+        val window = 512 * 1024
+        val total = window.toLong() * 2 + 1_024L
+        val payload = ByteArray(total.toInt()) { (it % 251).toByte() }
+        val offsets = mutableListOf<Long>()
+        val lengths = mutableListOf<Long>()
+        val access = FakeObjectAccess().apply {
+            partialProvider = { _, offset, length ->
+                offsets += offset; lengths += length
+                val end = minOf(total, offset + length).toInt()
+                okData(payload.copyOfRange(offset.toInt(), end))
+            }
+        }
+        val chunks = mutableListOf<ByteArray>()
+        val written = source(access).streamObjectChunked(7, total) { chunks += it }
+        assertEquals(total, written)
+        // 顺序读三块：0、512 KiB、1 MiB；最后一块只有 1 KiB，不能按整块请求越界。
+        assertEquals(listOf(0L, window.toLong(), window.toLong() * 2), offsets)
+        assertEquals(listOf(window.toLong(), window.toLong(), 1_024L), lengths)
+        assertTrue(chunks.all { it.size <= window })
+        assertEquals(total, chunks.sumOf { it.size.toLong() })
+        assertArrayEquals(payload, chunks.reduce { acc, bytes -> acc + bytes })
+    }
+
+    @Test fun chunkedDownloadStopsAtTransactionBoundaryWhenCancelled() = runBlocking {
+        val window = 512 * 1024
+        val total = window.toLong() * 4
+        val offsets = mutableListOf<Long>()
+        val access = FakeObjectAccess().apply {
+            partialProvider = { _, offset, length ->
+                offsets += offset
+                // 第二块开始前取消：模拟用户滑走，取消只发生在事务边界。
+                if (offset > 0) throw CancellationException("user swiped away")
+                okData(ByteArray(length.toInt()))
+            }
+        }
+        val received = mutableListOf<Int>()
+        try {
+            source(access).streamObjectChunked(7, total) { received += it.size }
+            fail("Cancellation swallowed")
+        } catch (_: CancellationException) {
+        }
+        // 只发出两块：第一块完整收下，第二块在发命令前就被取消。
+        assertEquals(listOf(0L, window.toLong()), offsets)
+        assertEquals(listOf(window), received)
+    }
+
+    @Test fun chunkedDownloadStopsWhenTheCameraReturnsNoMoreBytes() = runBlocking {
+        val total = 512L * 4
+        var calls = 0
+        val access = FakeObjectAccess().apply {
+            partialProvider = { _, _, _ -> calls++; okData(ByteArray(0)) }
+        }
+        val written = source(access).streamObjectChunked(7, total) { fail("Empty chunk handed to sink") }
+        assertEquals(0L, written)
+        assertEquals(1, calls)
     }
 }

@@ -34,7 +34,10 @@ private class BoundTetherImageView(context: Context) : AppCompatImageView(contex
     var bitmap: Bitmap? = null
     var uri: String? = null
     fun bind(image: TetherImage) {
-        if (source !== image.source) {
+        // 按 cacheIdentity 判断「是不是同一张图」：Repository 每次状态发射都会新建绑定对象，
+        // 用对象身份比较会导致每次重组都 detach/attach（清空 → 白屏 → 重新走 USB），
+        // 全屏预览因此闪烁并重复加载。
+        if (source?.cacheIdentity != image.source?.cacheIdentity) {
             source?.detach(this)
             source = image.source
             bitmap = null

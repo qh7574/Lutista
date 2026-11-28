@@ -52,6 +52,7 @@ import org.koin.android.ext.koin.androidContext
 import org.koin.core.module.dsl.singleOf
 import org.koin.core.parameter.parametersOf
 import org.koin.dsl.module
+import androidx.core.net.toUri
 
 val appModule = module {
     // Database
@@ -100,7 +101,22 @@ val appModule = module {
 
     // Services
     single { ImageProcessingService(androidContext(), get(), get(), get(), get(), get(), get()) }
-    single { TaskSubmissionManager(get(), get(), get(), get()) }
+    single {
+        TaskSubmissionManager(
+            get(), get(), get(), get(),
+            // 成品是否真的还在：文件路径直接判断；SAF 文档用 ContentResolver 打开一次验证。
+            productProbe = { path ->
+                if (path.startsWith("content://")) {
+                    runCatching {
+                        androidContext().contentResolver.openInputStream(path.toUri())
+                            ?.use { true } ?: false
+                    }.getOrDefault(false)
+                } else {
+                    java.io.File(path).isFile
+                }
+            },
+        )
+    }
 
     // Watermark System
     single { BitmapCache() }

@@ -29,6 +29,19 @@ interface TaskDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(task: TaskEntity): Long
 
+    @Query("UPDATE processing_tasks SET outputPath = :outputPath WHERE id = :id")
+    suspend fun updateOutputPath(id: Long, outputPath: String)
+
+    /** TETHER 重下后暂存原件路径会变（新的一次传输），复用旧任务时必须刷新，否则处理的是已删除文件。 */
+    @Query("UPDATE processing_tasks SET sourcePath = :sourcePath, originalSourcePath = :originalSourcePath, filterId = :filterId, watermarkId = :watermarkId, outputPath = '' WHERE id = :id")
+    suspend fun updateTetherSource(
+        id: Long,
+        sourcePath: String,
+        originalSourcePath: String,
+        filterId: Long,
+        watermarkId: Long,
+    )
+
     @Query("UPDATE processing_tasks SET status = :status WHERE id = :id")
     suspend fun updateStatus(id: Long, status: String)
 

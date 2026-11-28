@@ -31,6 +31,11 @@ fun TetherRoute(
     var initialConsumed by rememberSaveable { mutableStateOf(false) }
     var exiting by remember { mutableStateOf(false) }
     LaunchedEffect(repository) {
+        repository.notices.collect { message ->
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+        }
+    }
+    LaunchedEffect(repository) {
         repository.previewNotices.collect { notice ->
             when (notice) {
                 PreviewRenderNotice.FilterFramesDropped -> Toast.makeText(context,

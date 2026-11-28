@@ -40,10 +40,11 @@ class ImageProcessingService(
         private const val TAG = "ImageProcessingService"
     }
 
+    /** @return 成品最终落点（文件绝对路径或 SAF URI），调用方据此判断成品是否仍然存在。 */
     suspend fun processImage(
         task: TaskEntity,
         onProgress: (Float) -> Unit
-    ) = withContext(Dispatchers.IO) {
+    ): String = withContext(Dispatchers.IO) {
         val sourcePath = task.sourcePath
         val isCacheFile = sourcePath.startsWith(context.cacheDir.absolutePath)
         val stagingRoot = File(context.filesDir, ".tether-sources").absolutePath
@@ -163,6 +164,7 @@ class ImageProcessingService(
 
             onProgress(1.0f)
             logger.i(TAG, "图像处理完成: $outputPath")
+            return@withContext outputPath
         } finally {
             // Encoding can fail before saveBitmapWithExif takes ownership of the reserved stream.
             runCatching { allocatedOutput?.close() }

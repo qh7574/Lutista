@@ -16,6 +16,10 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.yield
+import timber.log.Timber
+
+/** 与 `TetherImageLoader` 的缩略图日志用同一个 tag，方便真机一次性 grep。 */
+private const val LOG_TAG = "TetherThumb"
 
 class CameraObjectResponseException(val operation: String, val responseCode: Int) :
     IOException("$operation rejected: 0x${responseCode.toString(16)}")
@@ -143,6 +147,38 @@ class PtpObjectSource internal constructor(
         if (preview != null) return preview
         // Only recover from a protocol rejection/no embedded preview. Transport failures propagate unchanged.
         return try { fetchThumb(handle) } catch (_: CameraObjectResponseException) { null }
+    }
+
+    override suspend fun streamObjectChunked(
+        handle: Long,
+        size: Long,
+        onChunk: (ByteArray) -> Unit,
+    ): Long {
+        if (size <= 0) return 0
+        var offset = 0L
+        var chunks = 0
+        // 用 JVM 也能跑的单调时钟（SystemClock 在单元测试里是 not mocked）。
+        val startedAt = System.nanoTime() / 1_000_000
+        while (offset < size) {
+            // 取消点只在事务边界：上一块已经完整收下，相机不在数据段中途。
+            currentCoroutineContext().ensureActive()
+            val length = minOf(RAW_PREVIEW_BYTES.toLong(), size - offset).toInt()
+            val bytes = fetchRange(handle, offset, length)
+            if (bytes.isEmpty()) break
+            onChunk(bytes)
+            offset += bytes.size
+            chunks++
+        }
+        logChunkedDownload(handle, offset, chunks, startedAt)
+        return offset
+    }
+
+    private fun logChunkedDownload(handle: Long, bytes: Long, chunks: Int, startedAt: Long) {
+        val elapsed = ((System.nanoTime() / 1_000_000) - startedAt).coerceAtLeast(1)
+        Timber.tag(LOG_TAG).i(
+            "整图分块下载完成：handle=0x%x bytes=%d chunks=%d elapsed=%dms (%.1f MB/s)",
+            handle, bytes, chunks, elapsed, bytes / 1024.0 / 1024.0 / (elapsed / 1000.0),
+        )
     }
 
     override suspend fun fetchRange(handle: Long, offset: Long, length: Int): ByteArray {

@@ -18,6 +18,17 @@ import java.util.concurrent.atomic.AtomicInteger
 
 private const val TRANSFER_LOG_TAG = "TetherTransfer"
 
+/**
+ * 一次手动批次的结果，用于给用户一句准确的反馈（真机 logs_1795849430417：重复多选下载时
+ * 界面只有一条旧路径报错，用户无从判断「到底跳过了几张、几张会出成品」）。
+ *
+ * @param skipped 已下载且无需再处理的张数（原片在、也没有待补的滤镜直出）
+ * @param processed 本批会走滤镜直出的张数（含复用已存在原片的补处理）
+ */
+data class ManualEnqueueSummary(val skipped: Int = 0, val processed: Int = 0) {
+    val isEmpty: Boolean get() = skipped == 0 && processed == 0
+}
+
 /** One bounded queue / one streaming object. No camera handle survives a session change. */
 class TransferEngine(
     scope: CoroutineScope,
@@ -41,6 +52,8 @@ class TransferEngine(
         var finished = false
         var cancelled = false
         var latest: TransferProgress? = null
+        /** 原片已提交过：跳过 USB 传输，只用已存在的副本做滤镜直出（用户 2026-11-28 的要求）。 */
+        var reuseOriginal = false
         val entries = mutableListOf<BatchEntry>()
     }
     private class BatchEntry(val batchId: Long, val index: Int, var value: TransferProgress) {
@@ -223,9 +236,9 @@ class TransferEngine(
     }
 
     /** Explicit manual selection is the only RAW/MOV entry. It does not bypass session checks. */
-    suspend fun enqueueManual(sessionKey: CameraSessionKey, objects: List<CameraObject>) {
-        val current = session?.takeIf { it.key == sessionKey } ?: return
-        enqueueBatch(current, objects, TransferKind.MANUAL, forceRetry = true, includeCompleted = true)
+    suspend fun enqueueManual(sessionKey: CameraSessionKey, objects: List<CameraObject>): ManualEnqueueSummary {
+        val current = session?.takeIf { it.key == sessionKey } ?: return ManualEnqueueSummary()
+        return enqueueBatch(current, objects, TransferKind.MANUAL, forceRetry = true, includeCompleted = true)
     }
 
     fun stableKey(sessionKey: CameraSessionKey, info: CameraObject): String =
@@ -259,10 +272,19 @@ class TransferEngine(
     private suspend fun enqueueBatch(
         current: Session, objects: List<CameraObject>, kind: TransferKind,
         forceRetry: Boolean, includeCompleted: Boolean,
-    ) {
+    ): ManualEnqueueSummary {
+        var summary = ManualEnqueueSummary()
         val work = gate.withLock {
-            if (session !== current) return
+            if (session !== current) return ManualEnqueueSummary()
             val candidates = mutableListOf<Pair<CameraObject, TransferRecord>>()
+            // 「已下载」记录的目标文件可能已被删除（用户清理、外部同步工具等）。用户再次显式
+            // 下载时必须真的重传，否则界面显示已下载、文件夹里却没有文件。
+            val staleDone = mutableSetOf<String>()
+            // 「已经下载过、但没有成品」的条目：滤镜直出打开时要为它补做处理，但跳过 USB 传输。
+            // 必须在 synchronized 之外判定（resolveEffects/processingRequired 都是 suspend）。
+            val reprocessReady = mutableSetOf<String>()
+            // 本批会产出成品的条目（决定「处理滤镜 N 张」这句提示）。
+            val processedKeys = mutableSetOf<String>()
             for (info in objects.filterNot { it.isDir }.distinctBy { key(current, it) }) {
                 // Keep AUTO/baseline eligibility and durable ACK semantics independent of UI batches.
                 if (kind == TransferKind.AUTO && (!isJpeg(info) || !taskSubmitter.automaticEnabled())) continue
@@ -272,17 +294,32 @@ class TransferEngine(
                     !eventOwnsBaseline(current, info, identity)) continue
                 if (!includeCompleted && existing?.state == TransferState.DONE) continue
                 if (existing?.state in setOf(TransferState.FAILED, TransferState.CANCELLED) && !forceRetry) continue
+                if (includeCompleted && existing?.state == TransferState.DONE &&
+                    !targets.committedOriginalExists(existing, existing.targetPath)) {
+                    staleDone += identity
+                }
                 val row = existing ?: store.insertIfAbsent(record(info, identity, kind))
+                val effects = if (isJpeg(info)) taskSubmitter.resolveEffects()?.takeIf { it.valid } else null
+                // 「这张还要不要生成成品」对两种来源都成立：新下载的要生成，已下载但成品缺失的
+                // 也要补生成（真机 logs_1795851337338：DB 里 COMPLETED 但成品文件已不在，
+                // 重新下载时被跳过，用户看到的就是「多选只有少数几张有成品」）。
+                val productNeeded = effects != null && taskSubmitter.processingRequired("$kind:${row.key}")
+                if (productNeeded) processedKeys += row.key
+                if (productNeeded && includeCompleted && row.state == TransferState.DONE && identity !in staleDone) {
+                    reprocessReady += identity
+                }
                 candidates += info to row
             }
-            if (candidates.isEmpty()) return
+            if (candidates.isEmpty()) return ManualEnqueueSummary()
             synchronized(progressLock) {
-                if (session !== current) return
+                if (session !== current) return ManualEnqueueSummary()
                 // Repeated camera events remain idempotent and do not manufacture new batches.
                 if (!includeCompleted && candidates.all { (info, row) ->
                     scheduled.containsKey("${current.key.id}:$kind:${row.key}") ||
                         mutableTransfers.value["$kind:${key(current, info)}"]?.state == TransferState.DONE
-                }) return
+                }) return ManualEnqueueSummary()
+                var skippedCount = 0
+                var processedCount = 0
                 val batchId = ++nextBatchId
                 val entries = mutableListOf<BatchEntry>()
                 val toSend = mutableListOf<Work>()
@@ -294,10 +331,14 @@ class TransferEngine(
                     val running = scheduled[token]
                     val previous = pending[itemKey]
                     val alreadyDone = row.state == TransferState.DONE || previous?.state == TransferState.DONE
+                    // 用户显式重新下载（includeCompleted）时，目标文件已经不见的条目必须真的重传；
+                    // 真机 logs_1795845419086：多选后只提交了 1 个任务，其余条目仍是 DONE 但没有文件。
+                    val needsRedownload = alreadyDone && row.key in staleDone
+                    val reusableDone = alreadyDone && !needsRedownload
                     val initial = when {
                         running != null -> requireNotNull(running.latest)
-                        alreadyDone && previous?.state == TransferState.DONE -> previous
-                        alreadyDone -> TransferProgress(current.key, row.key, row.name, row.state,
+                        reusableDone && previous?.state == TransferState.DONE -> previous
+                        reusableDone -> TransferProgress(current.key, row.key, row.name, row.state,
                             row.bytesDone, row.size, count.get(), paused.value, row.error, info.handle, kind,
                             // DONE is persisted only after commit; PENDING/RUNNING targetPath can be staging.
                             row.targetPath.takeIf { it.isNotBlank() })
@@ -306,11 +347,24 @@ class TransferEngine(
                     }.copy(batchId = batchId, batchIndex = offset + 1, batchTotal = candidates.size)
                     val entry = BatchEntry(batchId, offset + 1, initial)
                     entries += entry
-                    if (alreadyDone && running == null) entry.settled = true
-                    else {
+                    // 滤镜直出打开、且这张原片还没有成品时，不能只标记 settled：
+                    // 要复用已存在的原片补做一次处理并输出副本，但仍然跳过 USB 传输。
+                    val reprocessExisting = reusableDone && running == null && row.key in reprocessReady
+                    // 原片已在本地 → 这次不需要走 USB，计入「跳过已下载」。
+                    val skipDownload = reusableDone && running == null
+                    if (skipDownload) skippedCount++
+                    // 需要产出成品的条目计入「处理滤镜」：新下载的要处理，已下载但缺成品的补一次。
+                    if (row.key in processedKeys) processedCount++
+                    if (skipDownload && !reprocessExisting) {
+                        entry.settled = true
+                    } else {
+                        // forceRetry 只用于「上次失败/取消」的显式重试；已 DONE 且原片仍在的条目
+                        // 必须跳过（真机 logs_1795847176992：重复点下载会再次落盘并报错）。
+                        val resend = needsRedownload || (forceRetry && !reusableDone)
                         val item = running ?: Work(current, info, row.copy(handle = info.handle,
-                            state = if (forceRetry) TransferState.PENDING else row.state,
-                            error = if (forceRetry) null else row.error)).also {
+                            state = if (resend) TransferState.PENDING else row.state,
+                            error = if (resend) null else row.error)).also {
+                            it.reuseOriginal = reprocessExisting
                             scheduled[token] = it
                             count.incrementAndGet()
                             idle.value = false
@@ -331,6 +385,7 @@ class TransferEngine(
                 mutableTransfers.value = pending
                 val active = foreground?.isActive == true
                 if (!active) mutableProgress.value = entries.first().value.copy(queued = count.get())
+                summary = ManualEnqueueSummary(skipped = skippedCount, processed = processedCount)
                 toSend
             }
         }
@@ -349,6 +404,20 @@ class TransferEngine(
             }
             throw failure
         }
+        return summary
+    }
+
+    /**
+     * 为「已经下载过、但没有成品」的原片准备一个可读副本，用于跳过传输直接做滤镜直出。
+     * 返回 null 表示拿不到可读副本，此时会退回正常的整份传输。
+     */
+    private suspend fun materializeExisting(row: TransferRecord): DownloadedTransfer? {
+        val local = targets.materializeOriginal(row) ?: return null
+        Timber.tag(TRANSFER_LOG_TAG).i(
+            "复用已存在的原片做滤镜直出：kind=%s name=%s target=%s",
+            row.kind, row.name, row.targetPath,
+        )
+        return DownloadedTransfer(row.targetPath, local, row.size)
     }
 
     private suspend fun process(work: Work) {
@@ -356,10 +425,24 @@ class TransferEngine(
         var target: TransferTarget? = null
         var downloaded: DownloadedTransfer? = null
         var bytes = 0L
+        Timber.tag(TRANSFER_LOG_TAG).i(
+            "开始传输：kind=%s key=%s name=%s size=%d",
+            row.kind, row.key, row.name, row.size,
+        )
         try {
             ensureSession(work)
             // A crash may have happened after atomic file commit and before the DB update.
             downloaded = targets.recover(row)
+            if (downloaded == null && work.reuseOriginal) {
+                // 已提交过的原片：跳过 USB 传输，只为滤镜直出补一个可读副本。
+                downloaded = materializeExisting(row)
+            }
+            if (downloaded != null) {
+                Timber.tag(TRANSFER_LOG_TAG).i(
+                    "恢复上次已提交的传输：kind=%s name=%s target=%s",
+                    row.kind, row.name, downloaded.targetPath,
+                )
+            }
             if (downloaded == null) {
                 // Fresh ObjectInfo prevents overwritten/reused handles downloading a different file.
                 val actual = work.session.source.getObjectInfo(work.info.handle)
@@ -386,6 +469,10 @@ class TransferEngine(
                 target.finish()
                 downloaded = target.commit()
                 if (downloaded.bytes != actual.size) throw IOException("Committed object size mismatch")
+                Timber.tag(TRANSFER_LOG_TAG).i(
+                    "回传完成：kind=%s name=%s target=%s bytes=%d",
+                    row.kind, row.name, downloaded.targetPath, downloaded.bytes,
+                )
             }
             row = row.copy(state = TransferState.DOWNLOADED, targetPath = downloaded.targetPath, bytesDone = downloaded.bytes, error = null, updatedAt = now())
             store.save(row)
@@ -414,6 +501,12 @@ class TransferEngine(
                 // destination is the only copy the user needs.
                 val committed = requireNotNull(downloaded) { "Committed transfer missing after DONE" }
                 val cleanupFailure = runCatching { targets.release(row, committed) }.exceptionOrNull()
+                if (cleanupFailure == null) {
+                    Timber.tag(TRANSFER_LOG_TAG).i(
+                        "已清理私有暂存（用户可见原片保留）：name=%s target=%s",
+                        row.name, committed.targetPath,
+                    )
+                }
                 if (cleanupFailure != null) {
                     row = row.copy(error = listOfNotNull(row.error,
                         "Staging cleanup failed: ${cleanupFailure.message ?: cleanupFailure.javaClass.simpleName}")
@@ -440,6 +533,12 @@ class TransferEngine(
             }
         } catch (e: Exception) {
             withContext(NonCancellable) {
+                Timber.tag(TRANSFER_LOG_TAG).w(
+                    e,
+                    "传输失败：kind=%s key=%s name=%s stage=%s error=%s",
+                    row.kind, row.key, row.name,
+                    if (downloaded == null) "download" else "submit", e.message,
+                )
                 row = row.copy(state = if (downloaded == null) TransferState.FAILED else TransferState.SUBMISSION_FAILED,
                     bytesDone = downloaded?.bytes ?: bytes, error = e.message ?: e.javaClass.simpleName, updatedAt = now())
                 store.save(row)

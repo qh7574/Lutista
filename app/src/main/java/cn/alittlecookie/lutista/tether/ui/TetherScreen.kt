@@ -29,10 +29,12 @@ import androidx.compose.ui.unit.sp
 import cn.alittlecookie.lutista.ui.theme.getAppBarColor
 import cn.alittlecookie.lutista.ui.theme.lutistaBlurEffect
 import cn.alittlecookie.lutista.ui.theme.rememberLutistaBlurBackdrop
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.LinearProgressIndicator
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -105,10 +107,10 @@ private fun TetherScreenContent(state: TetherUiState, onAction: (TetherUiAction)
                 TetherPage.LiveView -> TetherLiveView(state, onAction, requestExit)
             }
         }
-        if (state.transfer.active || state.transfer.error != null) TetherTransferStatus(state.transfer, onAction)
         state.backgroundConnectionNotice?.let { TetherNotice(it, Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) }
     }
     TetherConnectionDialog(state.dialog, onAction)
+    TetherTransferDialog(state.transfer, onAction)
     pendingExit?.let { destinationName ->
         val destination = TetherExitDestination.valueOf(destinationName)
         TetherConfirmDialog(
@@ -167,16 +169,53 @@ fun TetherConnectionDialog(dialog: TetherDialogUi?, onAction: (TetherUiAction) -
     }
 }
 
+/**
+ * 下载进度只在对话框里呈现（用户要求「联机里的下载进度都改成对话框」）。
+ *
+ * 关掉对话框不会取消传输：传输由前台服务保活，重新进入联机界面还能看到进度；
+ * 所以 `show` 只跟「还在下载」或「有失败」挂钩，点「关闭」只是清掉失败提示。
+ */
 @Composable
-private fun TetherTransferStatus(transfer: TetherTransferUi, onAction: (TetherUiAction) -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("原片下载 ${transfer.completedCount}/${transfer.totalCount} · ${formatTetherBytes(transfer.bytesWritten)} / ${formatTetherBytes(transfer.totalBytes)}",
-            fontSize = 12.sp, color = MiuixTheme.colorScheme.onSurface)
-        LinearProgressIndicator(progress = if (transfer.totalBytes > 0) (transfer.bytesWritten.toFloat() / transfer.totalBytes).coerceIn(0f, 1f) else null, modifier = Modifier.fillMaxWidth())
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(transfer.error ?: "切到后台后，连接和下载仍由通知保持。", Modifier.weight(1f), fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-            if (transfer.active) TetherButton("取消下载", { onAction(TetherUiAction.CancelTransfer) })
-            else TetherButton("重试失败项", { onAction(TetherUiAction.RetryFailedTransfers) })
+private fun TetherTransferDialog(transfer: TetherTransferUi, onAction: (TetherUiAction) -> Unit) {
+    val active = transfer.active
+    OverlayDialog(
+        show = active || transfer.error != null,
+        title = if (active) "正在下载原片" else "下载未完成",
+        summary = "原片 → 输入文件夹；滤镜直出成品 → 输出文件夹",
+        onDismissRequest = { if (!active) onAction(TetherUiAction.DismissTransferSummary) },
+    ) {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(
+                "已完成 ${transfer.completedCount}/${transfer.totalCount} · ${formatTetherBytes(transfer.bytesWritten)} / ${formatTetherBytes(transfer.totalBytes)}",
+                style = MiuixTheme.textStyles.body2,
+                color = MiuixTheme.colorScheme.onSurface,
+            )
+            LinearProgressIndicator(
+                progress = if (transfer.totalBytes > 0) {
+                    (transfer.bytesWritten.toFloat() / transfer.totalBytes).coerceIn(0f, 1f)
+                } else {
+                    null
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                transfer.error ?: if (active) "切到后台后，连接和下载仍由通知保持。" else "可以继续挑选下一批。",
+                style = MiuixTheme.textStyles.footnote2,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                if (active) {
+                    TextButton("取消下载", { onAction(TetherUiAction.CancelTransfer) }, Modifier.weight(1f))
+                } else {
+                    TextButton("关闭", { onAction(TetherUiAction.DismissTransferSummary) }, Modifier.weight(1f))
+                    TextButton(
+                        text = "重试失败项",
+                        onClick = { onAction(TetherUiAction.RetryFailedTransfers) },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.textButtonColorsPrimary(),
+                    )
+                }
+            }
         }
     }
 }
