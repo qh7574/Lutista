@@ -42,10 +42,10 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import top.yukonga.miuix.kmp.basic.Checkbox
+import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -148,17 +148,27 @@ internal fun TetherGallery(state: TetherUiState, onAction: (TetherUiAction) -> U
                 }
             }
             Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    "原片 → 主页「输入文件夹」；滤镜直出成品 → 主页「输出文件夹」。",
+                    fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                )
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("保存至 ${gallery.destination}", modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-                    TetherButton("更改", { onAction(TetherUiAction.ChooseDownloadDirectory) })
+                    Column(Modifier.weight(1f)) {
+                        Text("滤镜直出", fontSize = 12.sp, color = MiuixTheme.colorScheme.onSurface)
+                        Text(
+                            if (state.directFilter) "回传或手动下载的原片，都会按主页全局滤镜/签名另存一张成品到主页输出文件夹（相册立即可见）。"
+                            else "只回传相机原片，不套滤镜，也不会让主页重复处理。",
+                            fontSize = 10.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        )
+                        state.directFilterReason?.let { Text(it, fontSize = 10.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary) }
+                    }
+                    Switch(checked = state.directFilter, onCheckedChange = { onAction(TetherUiAction.SetDirectFilter(it)) })
                 }
-                if (!gallery.destinationWritable) TetherNotice("目标目录不可写，请重新选择下载目录。", action = "选择目录") { onAction(TetherUiAction.ChooseDownloadDirectory) }
                 if (gallery.selectionMode) TetherButton(
                     "下载原片（${gallery.selectedHandles.size}）",
                     { onAction(TetherUiAction.Download(gallery.selectedHandles)) },
                     Modifier.fillMaxWidth(),
-                    enabled = gallery.selectedHandles.isNotEmpty() && gallery.destinationWritable && state.capabilities.canDownload,
+                    enabled = gallery.selectedHandles.isNotEmpty() && state.capabilities.canDownload,
                     primary = true,
                 )
             }

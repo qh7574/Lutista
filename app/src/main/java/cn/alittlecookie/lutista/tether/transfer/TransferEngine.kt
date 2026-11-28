@@ -12,8 +12,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import timber.log.Timber
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
+
+private const val TRANSFER_LOG_TAG = "TetherTransfer"
 
 /** One bounded queue / one streaming object. No camera handle survives a session change. */
 class TransferEngine(
@@ -388,12 +391,19 @@ class TransferEngine(
             store.save(row)
             publish(work, row, row.bytesDone, downloaded)
             val effects = if (isJpeg(work.info)) taskSubmitter.resolveEffects()?.takeIf { it.valid } else null
+            if (effects == null && isJpeg(work.info)) {
+                Timber.tag(TRANSFER_LOG_TAG).d("跳过滤镜直出：kind=%s key=%s（开关关闭或没有有效滤镜/签名）", row.kind, row.key)
+            }
             if (effects != null) {
                 check(!downloaded.localPath.isNullOrBlank()) { "Processing needs a readable original file" }
                 row = row.copy(state = TransferState.SUBMITTING, updatedAt = now())
                 store.save(row)
                 // Includes the transfer kind so AUTO/MANUAL can never silently alias task identities.
                 val taskId = taskSubmitter.submit("${row.kind}:${row.key}", downloaded, effects)
+                Timber.tag(TRANSFER_LOG_TAG).i(
+                    "提交滤镜直出任务：kind=%s key=%s taskId=%d filter=%d watermark=%d",
+                    row.kind, row.key, taskId, effects.filterId, effects.watermarkId,
+                )
                 row = row.copy(taskId = taskId)
             }
             row = row.copy(state = TransferState.DONE, updatedAt = now())

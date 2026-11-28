@@ -96,7 +96,7 @@ class FileMonitorService : LifecycleService(), KoinComponent {
     }
 
     private fun startMonitoring() {
-        logger.i(TAG, "开始监控文件夹: $monitorPath")
+        logger.i(TAG, "开始扫描输入文件夹: $monitorPath")
 
         lifecycleScope.launch {
             settingsManager.processedCount.distinctUntilChanged().collectLatest { count ->
@@ -138,6 +138,7 @@ class FileMonitorService : LifecycleService(), KoinComponent {
             try {
                 val file = File(filePath)
                 if (TetherProcessingSuppression.shared.shouldSuppress(filePath, file.name, file.length())) {
+                    logger.i(TAG, "跳过联机模式回传的图片，不参与实时处理: ${file.name}")
                     scannedFiles.add(filePath)
                     continue
                 }
@@ -174,6 +175,7 @@ class FileMonitorService : LifecycleService(), KoinComponent {
                 for (image in images) {
                     if (TetherProcessingSuppression.shared.shouldSuppress(
                             image.uri.toString(), image.displayName, image.size)) {
+                        logger.i(TAG, "跳过联机模式回传的图片，不参与实时处理: ${image.displayName}")
                         if (image.dateAdded > lastMediaStoreTimestamp) lastMediaStoreTimestamp = image.dateAdded
                         continue
                     }
@@ -298,6 +300,7 @@ class FileMonitorService : LifecycleService(), KoinComponent {
                 if (!isImageFile(name)) continue
                 val uriString = child.uri.toString()
                 if (TetherProcessingSuppression.shared.shouldSuppress(uriString, name, child.length())) {
+                    logger.i(TAG, "跳过联机模式回传的图片，不参与实时处理: $name")
                     scannedFiles.add(uriString)
                     continue
                 }
@@ -417,7 +420,7 @@ class FileMonitorService : LifecycleService(), KoinComponent {
             "文件监控",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
-            description = "监控文件夹中的新图片"
+            description = "输入文件夹中的新图片"
         }
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         manager.createNotificationChannel(channel)

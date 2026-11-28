@@ -266,7 +266,7 @@ fun HomeScreen(
                         if (noFilter && noWatermark) {
                             Toast.makeText(context, "需要至少应用一个效果", Toast.LENGTH_SHORT).show()
                         } else if (monitorPath.isEmpty()) {
-                            Toast.makeText(context, "请选择要监控的文件夹", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "请选择输入文件夹", Toast.LENGTH_SHORT).show()
                             pendingStartAfterPathSelect = true
                             onMonitorFolderClick()
                         } else {
@@ -429,14 +429,14 @@ private fun MonitorSettingsCard(
         Column(modifier = Modifier.fillMaxWidth()) {
             SwitchPreference(
                 title = "仅处理新增文件",
-                summary = if (isMonitorRunning) "服务运行中，不可更改" else "开启后只处理监控文件夹中新增的图片",
+                summary = if (isMonitorRunning) "服务运行中，不可更改" else "开启后只处理输入文件夹中新增的图片",
                 checked = onlyNewFiles,
                 enabled = !isMonitorRunning,
                 onCheckedChange = onOnlyNewFilesChange
             )
             ArrowPreference(
-                title = "监控文件夹",
-                summary = if (monitorPath.isNotEmpty()) decodeSafPath(monitorPath) else "点击设置监控文件夹",
+                title = "输入文件夹",
+                summary = if (monitorPath.isNotEmpty()) decodeSafPath(monitorPath) else "点击设置输入文件夹",
                 enabled = !isMonitorRunning,
                 onClick = if (isMonitorRunning) ({}) else onMonitorFolderClick
             )

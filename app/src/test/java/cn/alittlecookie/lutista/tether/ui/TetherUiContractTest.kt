@@ -107,9 +107,4 @@ class TetherUiContractTest {
         assertEquals(null, ready.liveViewFormatUnavailableReason())
     }
 
-    @Test
-    fun `auto download destination is explicit and does not depend on enabled effects`() {
-        assertEquals("请先在主页设置监控文件夹", TetherLiveViewUi().autoDownloadDestinationLabel)
-        assertEquals("回传至主页监控文件夹：/storage/monitor", TetherLiveViewUi(autoDownloadDestination = "/storage/monitor").autoDownloadDestinationLabel)
-    }
 }

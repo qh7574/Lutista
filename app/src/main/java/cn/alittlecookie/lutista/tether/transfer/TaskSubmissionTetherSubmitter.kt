@@ -15,7 +15,9 @@ class TaskSubmissionTetherSubmitter(
     private val watermarks: WatermarkRepository,
 ) : TetherTaskSubmitter {
     override suspend fun automaticEnabled(): Boolean = settings.tetherAutoTransfer.first()
+    /** 滤镜直出关闭时绝不提交处理任务：回传只有原片一张，也就不会出现第二张套过滤镜的图。 */
     override suspend fun resolveEffects(): TetherEffects? {
+        if (!settings.tetherDirectFilter.first()) return null
         val selectedFilter = settings.globalFilterId.first()
         val filter = if (selectedFilter > 0) try {
             filters.getFilterById(selectedFilter)?.takeIf { it.isEnabled }?.toConfig()?.let { selectedFilter } ?: 0L

@@ -27,7 +27,7 @@ class TransferDestinationTest {
                 TransferDestination.resolve(monitor)
                 fail("Every camera original must require the Home monitor folder")
             } catch (missing: IllegalStateException) {
-                assertTrue(missing.message.orEmpty().contains("主页面"))
+                assertTrue(missing.message.orEmpty().contains("输入文件夹"))
             }
         }
     }

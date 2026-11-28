@@ -19,7 +19,7 @@ import org.junit.Test
 
 /** Real adapter and repository resolution, with only the DAO/settings/submission boundary faked. */
 class TaskSubmissionTetherSubmitterTest {
-    private class Fixture(enabledFilter: Boolean, withWatermark: Boolean) {
+    private class Fixture(enabledFilter: Boolean, withWatermark: Boolean, directFilter: Boolean = true) {
         val settings = mockk<SettingsManager>()
         val submissions = mockk<TaskSubmissionManager>()
         val filterDao = mockk<FilterDao>()
@@ -30,6 +30,7 @@ class TaskSubmissionTetherSubmitterTest {
             every { settings.globalFilterId } returns flowOf(11L)
             every { settings.globalWatermarkId } returns flowOf(if (withWatermark) "22" else "none")
             every { settings.tetherAutoTransfer } returns flowOf(true)
+            every { settings.tetherDirectFilter } returns flowOf(directFilter)
             coEvery { filterDao.getFilterById(11L) } returns FilterEntity(
                 id = 11L, name = "Global", exposure = 0.5f, isEnabled = enabledFilter
             )
@@ -63,5 +64,14 @@ class TaskSubmissionTetherSubmitterTest {
     @Test fun enabledFilterStillResolvesThroughRealRepositoryAndConfigParser() = runBlocking {
         val fixture = Fixture(enabledFilter = true, withWatermark = false)
         assertEquals(TetherEffects(filterId = 11L, watermarkId = 0L), fixture.adapter.resolveEffects())
+    }
+
+    /** 滤镜直出关闭（默认）时，即使主页配了滤镜与签名，也绝不能提交第二条处理任务。 */
+    @Test fun directFilterOffSubmitsNoProcessingTaskEvenWithEnabledFilterAndWatermark() = runBlocking {
+        val fixture = Fixture(enabledFilter = true, withWatermark = true, directFilter = false)
+        assertNull(fixture.adapter.resolveEffects())
+        coVerify(exactly = 0) { fixture.filterDao.getFilterById(any()) }
+        coVerify(exactly = 0) { fixture.watermarkDao.getWatermarkById(any()) }
+        coVerify(exactly = 0) { fixture.submissions.submitTether(any(), any(), any(), any(), any(), any()) }
     }
 }

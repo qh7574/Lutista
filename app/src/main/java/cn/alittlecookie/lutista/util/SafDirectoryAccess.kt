@@ -12,7 +12,7 @@ import java.io.IOException
 /** The picker and background transfers must use the same read/write tree grant. */
 object SafDirectoryAccess {
     private const val READ_WRITE = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-    private const val RESELECT = "所选文件夹缺少读写权限，请重新选择并授权；自动回传请在主页面重选监控文件夹"
+    private const val RESELECT = "所选文件夹缺少读写权限，请重新选择并授权；自动回传请在主页重选输入文件夹"
 
     /** Call before saving a picker result. Never save a tree whose grant could not be retained. */
     fun persistReadWrite(context: Context, treeUri: Uri) {

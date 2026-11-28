@@ -134,7 +134,7 @@ internal fun TetherPreview(state: TetherUiState, onAction: (TetherUiAction) -> U
                 if (item.kind == TetherMediaKind.Video && localVideo == null) {
                     if (item.originalStatus == TetherOriginalStatus.Downloading) TetherBusy(item.originalLabel())
                     else TetherButton(if (item.originalStatus == TetherOriginalStatus.Failed) "下载中断 · 重试" else "下载完整视频后播放",
-                        { onAction(TetherUiAction.PlayVideo(item.handle)) }, enabled = state.gallery.destinationWritable && state.capabilities.canDownload)
+                        { onAction(TetherUiAction.PlayVideo(item.handle)) }, enabled = state.capabilities.canDownload)
                 }
             }
         }
@@ -167,7 +167,7 @@ internal fun TetherPreview(state: TetherUiState, onAction: (TetherUiAction) -> U
                 TetherButton(
                     if (media.originalStatus == TetherOriginalStatus.Downloaded) "原片已保存" else "下载原片",
                     { onAction(TetherUiAction.Download(setOf(media.handle))) }, Modifier.fillMaxWidth(),
-                    enabled = state.gallery.destinationWritable && state.capabilities.canDownload && media.originalStatus != TetherOriginalStatus.Downloading && media.originalStatus != TetherOriginalStatus.Downloaded,
+                    enabled = state.capabilities.canDownload && media.originalStatus != TetherOriginalStatus.Downloading && media.originalStatus != TetherOriginalStatus.Downloaded,
                     primary = true,
                 )
             }

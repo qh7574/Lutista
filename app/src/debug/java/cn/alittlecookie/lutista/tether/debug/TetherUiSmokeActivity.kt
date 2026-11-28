@@ -100,7 +100,7 @@ private fun smokeState(page: TetherPage, source: TetherImageSource): TetherUiSta
                 originalStatus = if (handle == 1L) TetherOriginalStatus.Downloaded else TetherOriginalStatus.OnCamera)
         }, storages = listOf(TetherStorageUi(1, "模拟卡 1", 12), TetherStorageUi(2, "模拟卡 2", 12)),
             directories = listOf(TetherDirectoryUi(100, "模拟 100PHOTO", 1), TetherDirectoryUi(200, "模拟 200PHOTO", 2)),
-            enumerating = true, enumeratedCount = 20, totalCount = 24, destination = "模拟 / Pictures/Lutista（不写文件）",
+            enumerating = true, enumeratedCount = 20, totalCount = 24,
             clockWarning = "模拟时钟提示：这里只演示可关闭提示，不检查相机时间。"),
         preview = TetherPreviewUi(handle = 1),
         parameters = TetherParametersUi(modeLabel = "模拟 M", exposureSubMode = "模拟 descriptor 快照",
@@ -117,8 +117,7 @@ private fun smokeState(page: TetherPage, source: TetherImageSource): TetherUiSta
                 TetherLiveViewFormatUi(1, "模拟档位 2", "1120 × 840"),
                 TetherLiveViewFormatUi(2, "模拟档位 3", "1600 × 1200"),
             ),
-            filterAvailable = true, globalFilterName = "模拟全局滤镜", autoDownloadAvailable = true,
-            autoDownloadDestination = "模拟 / monitor"))
+            filterAvailable = true, globalFilterName = "模拟全局滤镜", autoDownloadAvailable = true))
 }
 
 private fun TetherUiState.withFormatCase(case: String?): TetherUiState = when (case) {

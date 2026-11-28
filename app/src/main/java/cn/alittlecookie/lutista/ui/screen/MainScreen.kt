@@ -337,7 +337,7 @@ private fun MainScreenContent(openTetherRequestId: Long = 0L) {
                     settingsManager.setMonitorPath(it.toString())
                 } catch (cancel: CancellationException) { throw cancel
                 } catch (failure: Exception) {
-                    Toast.makeText(context, failure.message ?: "无法保留监控目录的读写授权，请重新选择可写目录", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, failure.message ?: "无法保留输入文件夹的读写授权，请重新选择可写目录", Toast.LENGTH_LONG).show()
                 }
             }
         }

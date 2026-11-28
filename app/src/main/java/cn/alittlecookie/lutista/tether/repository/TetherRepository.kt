@@ -72,6 +72,7 @@ class TetherRepository(
     private var visibleEntities = emptyList<CameraObjectEntity>()
     private var previewEntity: CameraObjectEntity? = null
     private var currentFilter: FilterConfig? = null
+    private var hasDirectWatermark: Boolean = false
     private var previewRenderingFailed = false
     private var originalStyle: Long? = null
     private val mediaProgress = mutableMapOf<Long, TetherTransferItemUi>()
@@ -135,10 +136,6 @@ class TetherRepository(
                 })) }
         } }
         scope.launch { settings.useBlur.collect { value -> update { it.copy(useBlur = value) } } }
-        scope.launch { settings.monitorPath.collect { path ->
-            update { it.copy(gallery = it.gallery.copy(destination = path.ifBlank { "请先在主页设置监控文件夹" }),
-                liveView = it.liveView.copy(autoDownloadDestination = path)) }
-        } }
         scope.launch { settings.tetherAutoTransfer.collect { value -> updateLive { it.copy(autoDownload = value) } } }
         scope.launch { settings.tetherLiveViewFilterEnabled.distinctUntilChanged().collect { value ->
             val effective = value && !previewRenderingFailed
@@ -150,6 +147,12 @@ class TetherRepository(
             currentFilter = filter
             updateLive { it.copy(filterAvailable = filter != null, globalFilterName = filter?.name,
                 filterUnavailableReason = if (filter == null) "请先选择有效的全局滤镜" else null) }
+            updateDirectFilterAvailability()
+        } }
+        scope.launch { settings.tetherDirectFilter.distinctUntilChanged().collect { value -> update { it.copy(directFilter = value) } } }
+        scope.launch { settings.globalWatermarkId.distinctUntilChanged().collect { id ->
+            hasDirectWatermark = id.isNotBlank() && id != "none"
+            updateDirectFilterAvailability()
         } }
         scope.launch { combine(transfers.transfers, transfers.progress, transfers.batches) { items, progress, batches ->
             Triple(items.values.toList(), progress, batches)
@@ -303,7 +306,7 @@ class TetherRepository(
                     check(eventBarrier.publish(window, driver, current)) { "相机会话已关闭" }
                     settings.setTetherLastCameraModel(device.model)
                     update { it.copy(cameraName = device.model, cameraDetails = "${device.manufacturer} · ${device.deviceVersion}",
-                        gallery = TetherGalleryUi(destination = it.gallery.destination), parameters = TetherParametersUi(),
+                        gallery = TetherGalleryUi(), parameters = TetherParametersUi(),
                         preview = TetherPreviewUi(), transfer = TetherTransferUi()) }
                     updateCapabilities()
                     observeGallery(current)
@@ -438,6 +441,17 @@ class TetherRepository(
         }
     }
 
+    /** 滤镜直出只有在存在有效滤镜或签名时才会产出成品；否则开关开着也只回传原片。 */
+    private fun updateDirectFilterAvailability() {
+        val available = currentFilter != null || hasDirectWatermark
+        update {
+            it.copy(
+                directFilterAvailable = available,
+                directFilterReason = if (available) null else "请先在主页全局设置里选择已启用的滤镜或签名",
+            )
+        }
+    }
+
     private fun updateCapabilities() {
         val caps = runtime.caps.value
         fun can(feature: Feature) = runtime.state.value.phase == TetherPhase.Connected && caps[feature].availability != Availability.Unsupported
@@ -493,9 +507,10 @@ class TetherRepository(
                 updateLive { it.copy(filterEnabled = action.enabled) }
                 settings.setTetherLiveViewFilterEnabled(action.enabled)
             }
+            is TetherUiAction.SetDirectFilter -> launchAction { settings.setTetherDirectFilter(action.enabled) }
             is TetherUiAction.SetAutoDownload -> launchAction {
                 if (action.enabled) check(settings.monitorPath.first().isNotBlank()) {
-                    "请先在主页面设置监控文件夹，再接收相机照片"
+                    "请先在主页设置输入文件夹，再接收相机照片"
                 }
                 settings.setTetherAutoTransfer(action.enabled)
             }
@@ -506,7 +521,7 @@ class TetherRepository(
             is TetherUiAction.ExitLiveView -> launchAction { leaveLiveView(action.destination, action.restoreOriginalStyle) }
             is TetherUiAction.StopRecordingAndExit -> launchAction { leaveLiveView(action.destination, action.restoreOriginalStyle) }
             // Android directory picker/global settings navigation belong to the Route.
-            TetherUiAction.ChooseDownloadDirectory, TetherUiAction.OpenGlobalFilterSettings -> Unit
+            TetherUiAction.OpenGlobalFilterSettings -> Unit
         }
     }
 

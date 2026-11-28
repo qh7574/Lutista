@@ -72,8 +72,6 @@ data class TetherGalleryUi(
     val selectedHandles: Set<Long> = emptySet(),
     val clockWarning: String? = null,
     val error: String? = null,
-    val destination: String = "Pictures/Lutista",
-    val destinationWritable: Boolean = true,
     val directoryWarning: String? = null,
 )
 
@@ -153,12 +151,9 @@ data class TetherLiveViewUi(
     val autoDownload: Boolean = false,
     val autoDownloadAvailable: Boolean = false,
     val autoDownloadReason: String? = null,
-    val autoDownloadDestination: String = "",
 ) {
     /** Preserve the camera's advertised index; never fall back to a different tuple. */
     val selectedFormat: TetherLiveViewFormatUi? get() = formats.firstOrNull { it.index == selectedFormatIndex }
-    val autoDownloadDestinationLabel: String get() = autoDownloadDestination.takeIf { it.isNotBlank() }
-        ?.let { "回传至主页监控文件夹：$it" } ?: "请先在主页设置监控文件夹"
 }
 
 /** Keep the resolution entry visible; explain why its advertised choices cannot be changed. */
@@ -218,6 +213,10 @@ data class TetherUiState(
     val transfer: TetherTransferUi = TetherTransferUi(),
     val dialog: TetherDialogUi? = null,
     val useBlur: Boolean = true,
+    /** 相册与取景共用的同一个「滤镜直出」开关（持久化在设置里，不在会话里）。 */
+    val directFilter: Boolean = false,
+    val directFilterAvailable: Boolean = false,
+    val directFilterReason: String? = null,
 )
 
 sealed interface TetherUiAction {
@@ -234,7 +233,6 @@ sealed interface TetherUiAction {
     data class ToggleSelection(val handle: Long) : TetherUiAction
     data object SelectAll : TetherUiAction
     data object DismissClockWarning : TetherUiAction
-    data object ChooseDownloadDirectory : TetherUiAction
     data class Download(val handles: Set<Long>) : TetherUiAction
     data object CancelTransfer : TetherUiAction
     data object RetryFailedTransfers : TetherUiAction
@@ -246,6 +244,7 @@ sealed interface TetherUiAction {
     data class SetPreviewFilter(val enabled: Boolean) : TetherUiAction
     data object OpenGlobalFilterSettings : TetherUiAction
     data class SetAutoDownload(val enabled: Boolean) : TetherUiAction
+    data class SetDirectFilter(val enabled: Boolean) : TetherUiAction
     data object Capture : TetherUiAction
     data object ToggleRecording : TetherUiAction
     data object RetryLiveView : TetherUiAction

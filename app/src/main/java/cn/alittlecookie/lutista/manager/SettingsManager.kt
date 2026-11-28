@@ -354,6 +354,12 @@ class SettingsManager(
     suspend fun setTetherAutoTransfer(value: Boolean) { dataStore.edit { it[TETHER_AUTO_TRANSFER_KEY] = value } }
     fun getTetherAutoTransferSync(): Boolean = runBlocking { tetherAutoTransfer.first() }
 
+    /** 滤镜直出：回传后按全局滤镜/签名再生成一张成品，输出到主页输出文件夹。
+     * OFF（默认）只回传相机原片，绝不产生第二张图，也不触发主页实时处理。 */
+    val tetherDirectFilter: Flow<Boolean> = dataStore.data.map { it[TETHER_DIRECT_FILTER_KEY] ?: false }
+    suspend fun setTetherDirectFilter(value: Boolean) { dataStore.edit { it[TETHER_DIRECT_FILTER_KEY] = value } }
+    fun getTetherDirectFilterSync(): Boolean = runBlocking { tetherDirectFilter.first() }
+
     val tetherLiveViewFormatIndex: Flow<Int> = dataStore.data.map { (it[TETHER_LIVE_VIEW_FORMAT_INDEX_KEY] ?: 0).coerceAtLeast(0) }
     suspend fun setTetherLiveViewFormatIndex(value: Int) { dataStore.edit { it[TETHER_LIVE_VIEW_FORMAT_INDEX_KEY] = value.coerceAtLeast(0) } }
     fun getTetherLiveViewFormatIndexSync(): Int = runBlocking { tetherLiveViewFormatIndex.first() }
@@ -406,6 +412,7 @@ class SettingsManager(
 
     companion object {
         private val TETHER_AUTO_TRANSFER_KEY = booleanPreferencesKey("tether_auto_transfer")
+        private val TETHER_DIRECT_FILTER_KEY = booleanPreferencesKey("tether_direct_filter")
         private val TETHER_LIVE_VIEW_FORMAT_INDEX_KEY = intPreferencesKey("tether_live_view_format_index")
         private val TETHER_LAST_CAMERA_MODEL_KEY = stringPreferencesKey("tether_last_camera_model")
         private val TETHER_FORCE_PHOTO_STYLE_RESTORE_KEY = booleanPreferencesKey("tether_force_photo_style_restore")

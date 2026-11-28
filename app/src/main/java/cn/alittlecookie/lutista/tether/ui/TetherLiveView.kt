@@ -217,8 +217,17 @@ private fun TetherParameterPanel(
                 Text("拍摄后自动回传 JPEG", Modifier.weight(1f), fontSize = 12.sp, color = MiuixTheme.colorScheme.onSurface)
                 Switch(checked = state.liveView.autoDownload, onCheckedChange = { onAction(TetherUiAction.SetAutoDownload(it)) }, enabled = state.liveView.autoDownloadAvailable)
             }
-            Text(state.liveView.autoDownloadDestinationLabel, fontSize = 10.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-            Text("未启用处理效果时保留原片；有效效果将按主页设置处理。", fontSize = 10.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+            Text("原片 → 主页「输入文件夹」；成品 → 主页「输出文件夹」（落点可在主页修改）", fontSize = 10.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("滤镜直出（回传后套滤镜另存一份）", Modifier.weight(1f), fontSize = 12.sp, color = MiuixTheme.colorScheme.onSurface)
+                Switch(checked = state.directFilter, onCheckedChange = { onAction(TetherUiAction.SetDirectFilter(it)) })
+            }
+            Text(
+                if (state.directFilter) "回传或手动下载的原片，都会按主页全局滤镜/签名再输出一张成品到主页输出文件夹（相册立即可见）。"
+                else "只回传相机原片一张，不套滤镜、也不会让主页再处理一遍。",
+                fontSize = 10.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            )
+            state.directFilterReason?.let { Text(it, fontSize = 10.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary) }
             state.liveView.autoDownloadReason?.let { Text(it, fontSize = 10.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary) }
         }
         }

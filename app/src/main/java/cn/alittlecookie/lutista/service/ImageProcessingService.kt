@@ -3,6 +3,7 @@ package cn.alittlecookie.lutista.service
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.provider.DocumentsContract
 import cn.alittlecookie.lutista.data.database.entity.TaskEntity
@@ -154,6 +155,9 @@ class ImageProcessingService(
                 TetherProcessingSuppression.shared.bind(token, outputPath, actualName)
             }
             val written = saveBitmapWithExif(outputBitmap, outputPath, format, quality, exifResolution, allocatedOutput?.stream)
+            // TETHER 成品走 TetherOutputAllocator 预留的输出流（reservedStream），不会经过
+            // saveBitmapWithExif 里的普通文件分支；媒体库登记必须在这里统一做，否则系统相册看不到成品。
+            if (!outputPath.startsWith("content://")) scanIntoMediaStore(File(outputPath), format)
             outputReservation?.let { TetherProcessingSuppression.shared.complete(it, outputPath, written) }
             outputCommitted = true
 
@@ -221,7 +225,9 @@ class ImageProcessingService(
     private suspend fun resolveOutputPath(task: TaskEntity, ext: String, name: String): String {
         if (task.outputPath.isNotEmpty()) return task.outputPath
 
-        val customPath = settingsManager.outputPath.first()
+        val configuredPath = settingsManager.outputPath.first()
+        // 滤镜直出产物绝不能被写进输入文件夹，否则主页监控会把它当成新照片再处理一遍。
+        val customPath = if (task.source == TaskSource.TETHER.name) tetherOutputBase(configuredPath) else configuredPath
         if (customPath.isEmpty()) {
             val dir = fileUtils.getDefaultOutputDir()
             return fileUtils.buildOutputPath(dir, name)
@@ -236,6 +242,16 @@ class ImageProcessingService(
 
         val dir = fileUtils.getOutputDir(customPath)
         return fileUtils.buildOutputPath(dir, name)
+    }
+
+    private suspend fun tetherOutputBase(configuredPath: String): String {
+        val placement = TetherOutputPlacement.resolve(
+            customOutput = configuredPath,
+            monitor = settingsManager.monitorPath.first(),
+            defaultDir = fileUtils.getDefaultOutputDir().absolutePath,
+        )
+        placement.reason?.let { logger.w(TAG, "滤镜直出产物改落点：$it → ${placement.base}") }
+        return placement.base
     }
 
     private fun fallbackToDefaultFile(name: String): String {
@@ -277,5 +293,25 @@ class ImageProcessingService(
             file.writeBytes(outputBytes)
         }
         return outputBytes.size.toLong()
+    }
+
+    /**
+     * 直接写入文件系统（而不是通过 SAF/MediaProvider）的成品必须主动登记到媒体库，
+     * 否则系统相册/图库扫描不到这些文件，用户会以为「只输出了原图」。
+     */
+    private fun scanIntoMediaStore(file: File, format: Bitmap.CompressFormat) {
+        val mime = when (format) {
+            Bitmap.CompressFormat.PNG -> "image/png"
+            Bitmap.CompressFormat.JPEG -> "image/jpeg"
+            // WEBP_LOSSY/WEBP_LOSSLESS 是 API 30 常量，这里用 else 兜住避免 minSdk 29 的 NewApi。
+            else -> "image/webp"
+        }
+        runCatching {
+            logger.d(TAG, "媒体库登记: $mime ${file.absolutePath}")
+            MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), arrayOf(mime)) { _, uri ->
+                // 回调给出 MediaProvider 的最终 URI；null 表示扫描失败（真机排查「相册看不到」时靠这行）。
+                logger.i(TAG, "媒体库登记完成: ${uri ?: "失败"} ${file.absolutePath}")
+            }
+        }.onFailure { logger.w(TAG, "媒体库登记失败: ${file.absolutePath} (${it.message})") }
     }
 }
