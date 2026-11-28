@@ -37,6 +37,7 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -46,11 +47,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -81,6 +84,9 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 private const val LiveAspectRatio = 1.4817f
 
+/** 取景面板的中性深色底：面板颜色都以它与主题强调色混合得到。 */
+private val LiveDarkBase = Color(0xFF1B1B1F)
+
 private val ExposureKeys = listOf(
     TetherParameterKey.Aperture,
     TetherParameterKey.Shutter,
@@ -103,6 +109,61 @@ private sealed interface LivePicker {
     data object TargetFps : LivePicker
 }
 
+/* ----------------------------------------------------------------- palette */
+
+/**
+ * 取景界面固定压在纯黑的取景舞台之上，但配色不能写死：
+ * 表面色由主题 surface 向黑色混合、文字由 onSurface 向白色混合，
+ * 强调色仍用 primary / error。这样切换深色模式或开启莫奈取色时，
+ * 面板与两侧工具栏会跟着主题染色，而不是永远的 #111114。
+ */
+private data class LiveColors(
+    val surface: Color,
+    val rail: Color,
+    val onSurface: Color,
+    val secondary: Color,
+    val container: Color,
+    val hairline: Color,
+)
+
+private val LocalLiveColors = staticCompositionLocalOf<LiveColors?> { null }
+
+@Composable
+private fun defaultLiveColors(): LiveColors {
+    val scheme = MiuixTheme.colorScheme
+    return LiveColors(
+        surface = scheme.surface,
+        rail = scheme.surfaceVariant,
+        onSurface = scheme.onSurface,
+        secondary = scheme.onSurfaceVariantSummary,
+        container = scheme.secondaryContainer,
+        hairline = scheme.onSurface.copy(alpha = .12f),
+    )
+}
+
+@Composable
+private fun liveColors(): LiveColors = LocalLiveColors.current ?: defaultLiveColors()
+
+/** 取景页统一套一层：把主题色换算成暗色舞台上的可用配色。 */
+@Composable
+private fun LiveDarkSurface(content: @Composable () -> Unit) {
+    val scheme = MiuixTheme.colorScheme
+    // 舞台固定是黑的，面板则用「中性深色 + 主题强调色」调出来：
+    // 强调色来自 primary，所以莫奈取色 / 换主题种子色时面板会跟着染色，
+    // 亮度又稳定落在「比纯黑亮一档」的区间，不会和取景黑底糊在一起。
+    val base = lerp(LiveDarkBase, scheme.primary, .10f)
+    val text = lerp(scheme.onSurface, Color.White, .92f)
+    val colors = LiveColors(
+        surface = base,
+        rail = lerp(base, Color.Black, .45f),
+        onSurface = text,
+        secondary = text.copy(alpha = .62f),
+        container = text.copy(alpha = .10f),
+        hairline = text.copy(alpha = .14f),
+    )
+    CompositionLocalProvider(LocalLiveColors provides colors) { content() }
+}
+
 @Composable
 internal fun TetherLiveView(
     state: TetherUiState,
@@ -116,10 +177,12 @@ internal fun TetherLiveView(
     UseLightSystemBarIcons()
     BoxWithConstraints(modifier.fillMaxSize().background(Color.Black)) {
         val spec = TetherLayoutSpec.fromSize(maxWidth.value, maxHeight.value)
-        if (spec.landscape) {
-            LiveLandscape(state, onAction, requestExit) { picker = it }
-        } else {
-            LivePortrait(state, onAction, requestExit) { picker = it }
+        LiveDarkSurface {
+            if (spec.landscape) {
+                LiveLandscape(state, onAction, requestExit) { picker = it }
+            } else {
+                LivePortrait(state, onAction, requestExit) { picker = it }
+            }
         }
     }
     LivePickerDialogs(state, picker, onAction) { picker = null }
@@ -134,6 +197,7 @@ private fun LivePortrait(
     requestExit: (TetherExitDestination) -> Unit,
     openPicker: (LivePicker) -> Unit,
 ) {
+    val colors = liveColors()
     val live = state.liveView
     var tab by rememberSaveable { mutableIntStateOf(0) }
     // 面板三档高度与原型一致：折叠 / 半展 / 全展。
@@ -175,20 +239,20 @@ private fun LivePortrait(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(onClick = { requestExit(TetherExitDestination.Back) }) {
-                    Icon(MiuixIcons.Back, contentDescription = "退出实时预览", tint = Color.White)
+                    Icon(MiuixIcons.Back, contentDescription = "退出实时预览", tint = colors.onSurface)
                 }
                 Column(Modifier.weight(1f).padding(start = 2.dp)) {
-                    Text("实时预览", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+                    Text("实时预览", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = colors.onSurface)
                     Text(
                         liveSubtitle(state),
                         fontSize = 12.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        color = if (live.isRecording) Color(0xFFFF6B60) else Color.White.copy(alpha = .6f),
+                        color = if (live.isRecording) Color(0xFFFF6B60) else colors.onSurface.copy(alpha = .6f),
                     )
                 }
                 state.batteryPercent?.let {
-                    Text("$it%", fontSize = 12.sp, color = Color.White.copy(alpha = .6f))
+                    Text("$it%", fontSize = 12.sp, color = colors.onSurface.copy(alpha = .6f))
                 }
             }
             // 预览区与底部面板共用同一个容器：面板被裁剪在这里，永远不会压住下面的
@@ -206,7 +270,7 @@ private fun LivePortrait(
                         .height(fullHeight)
                         .offset { IntOffset(0, currentOffset.roundToInt()) }
                         .clip(RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp))
-                        .background(MiuixTheme.colorScheme.surface)
+                        .background(colors.surface)
                         .draggable(
                             state = dragState,
                             orientation = Orientation.Vertical,
@@ -225,15 +289,19 @@ private fun LivePortrait(
                     Box(Modifier.fillMaxWidth().height(22.dp), contentAlignment = Alignment.Center) {
                         Box(
                             Modifier.width(36.dp).height(4.dp).clip(RoundedCornerShape(2.dp))
-                                .background(MiuixTheme.colorScheme.onSurface.copy(alpha = .2f)),
+                                .background(colors.onSurface.copy(alpha = .2f)),
                         )
                     }
                     Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        // 面板顶部固定五个常用参数，按权重均分即水平居中。
+                        // 下面的分类页里不再重复这五项，只放档位 / 格调 / 更多设置。
+                        QuickValue("光圈", live.readout(TetherParameterKey.Aperture, state), Modifier.weight(1f), enabled = false) {}
+                        QuickValue("快门", live.readout(TetherParameterKey.Shutter, state), Modifier.weight(1f), enabled = live.shutterWritable(state)) { openPicker(LivePicker.Param(TetherParameterKey.Shutter)) }
                         QuickValue("ISO", live.readout(TetherParameterKey.Iso, state), Modifier.weight(1f)) { openPicker(LivePicker.Param(TetherParameterKey.Iso)) }
-                        QuickValue("快门", live.readout(TetherParameterKey.Shutter, state), Modifier.weight(1f)) { openPicker(LivePicker.Param(TetherParameterKey.Shutter)) }
                         QuickValue("EV", live.readout(TetherParameterKey.ExposureCompensation, state), Modifier.weight(1f)) { openPicker(LivePicker.Param(TetherParameterKey.ExposureCompensation)) }
                         QuickValue("白平衡", live.readout(TetherParameterKey.WhiteBalance, state), Modifier.weight(1f)) { openPicker(LivePicker.Param(TetherParameterKey.WhiteBalance)) }
                     }
@@ -259,18 +327,18 @@ private fun LivePortrait(
                     state.parameters.modeLabel,
                     Modifier
                         .clip(RoundedCornerShape(8.dp))
-                        .border(1.dp, Color.White.copy(alpha = .28f), RoundedCornerShape(8.dp))
-                        .background(Color.White.copy(alpha = .08f))
+                        .border(1.dp, colors.hairline, RoundedCornerShape(8.dp))
+                        .background(colors.container)
                         .padding(horizontal = 9.dp, vertical = 3.dp),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
-                    color = Color.White,
+                    color = colors.onSurface,
                 )
                 Text(
                     if (live.isRecording) "录制中 · ${formatTetherTime(live.recordingElapsedMillis)}"
                     else "请拨动相机转盘 · 上拉面板调参数",
                     fontSize = 11.sp,
-                    color = Color.White.copy(alpha = .48f),
+                    color = colors.onSurface.copy(alpha = .48f),
                 )
             }
             Row(
@@ -304,23 +372,24 @@ private fun LiveLandscape(
     requestExit: (TetherExitDestination) -> Unit,
     openPicker: (LivePicker) -> Unit,
 ) {
+    val colors = liveColors()
     val live = state.liveView
     HideSystemBarsInLandscape()
     Row(Modifier.fillMaxSize().background(Color.Black)) {
         Column(
-            Modifier.width(TetherLayoutSpec.LEFT_RAIL_WIDTH_DP.dp).fillMaxHeight().background(Color(0xFF111114)).padding(horizontal = 6.dp, vertical = 8.dp),
+            Modifier.width(TetherLayoutSpec.LEFT_RAIL_WIDTH_DP.dp).fillMaxHeight().background(colors.rail).padding(horizontal = 6.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(5.dp),
         ) {
             IconButton(onClick = { requestExit(TetherExitDestination.Back) }, modifier = Modifier.fillMaxWidth().height(32.dp)) {
-                Icon(MiuixIcons.Back, contentDescription = "退出实时预览", tint = Color.White.copy(alpha = .85f))
+                Icon(MiuixIcons.Back, contentDescription = "退出实时预览", tint = colors.onSurface.copy(alpha = .85f))
             }
             Box(
                 Modifier.fillMaxWidth().height(34.dp).clip(RoundedCornerShape(9.dp))
-                    .background(Color.White.copy(alpha = .1f))
-                    .border(1.dp, Color.White.copy(alpha = .22f), RoundedCornerShape(9.dp)),
+                    .background(colors.container)
+                    .border(1.dp, colors.hairline, RoundedCornerShape(9.dp)),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(state.parameters.modeLabel, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                Text(state.parameters.modeLabel, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = colors.onSurface)
             }
             RailTool("光圈", live.readout(TetherParameterKey.Aperture, state), Modifier, enabled = false) {}
             RailTool("快门", live.readout(TetherParameterKey.Shutter, state), Modifier,
@@ -345,11 +414,11 @@ private fun LiveLandscape(
                 fontSize = 10.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                color = Color.White.copy(alpha = .86f),
+                color = colors.onSurface.copy(alpha = .86f),
             )
         }
         Column(
-            Modifier.width(TetherLayoutSpec.RIGHT_RAIL_WIDTH_DP.dp).fillMaxHeight().background(Color(0xFF111114)).padding(horizontal = 6.dp, vertical = 8.dp),
+            Modifier.width(TetherLayoutSpec.RIGHT_RAIL_WIDTH_DP.dp).fillMaxHeight().background(colors.rail).padding(horizontal = 6.dp, vertical = 8.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -358,9 +427,9 @@ private fun LiveLandscape(
                 onClick = { onAction(TetherUiAction.SetPreviewFilter(!live.filterEnabled)) },
                 modifier = Modifier.size(36.dp),
                 enabled = live.filterAvailable,
-                backgroundColor = if (live.filterEnabled) MiuixTheme.colorScheme.primary else Color.White.copy(alpha = .1f),
+                backgroundColor = if (live.filterEnabled) MiuixTheme.colorScheme.primary else colors.container,
             ) {
-                Icon(MiuixIcons.Filter, contentDescription = "预览滤镜", tint = Color.White, modifier = Modifier.size(18.dp))
+                Icon(MiuixIcons.Filter, contentDescription = "预览滤镜", tint = colors.onSurface, modifier = Modifier.size(18.dp))
             }
             LiveSwitchPill("回传", live.autoDownload, Modifier.fillMaxWidth(), enabled = live.autoDownloadAvailable) {
                 onAction(TetherUiAction.SetAutoDownload(!live.autoDownload))
@@ -378,9 +447,10 @@ private fun LiveLandscape(
 
 @Composable
 private fun LiveFrame(state: TetherUiState, onAction: (TetherUiAction) -> Unit, modifier: Modifier) {
+    val colors = liveColors()
     val live = state.liveView
     Box(
-        modifier.clip(RoundedCornerShape(14.dp)).background(Color(0xFF0A0A0C)),
+        modifier.clip(RoundedCornerShape(14.dp)).background(colors.rail),
         contentAlignment = Alignment.Center,
     ) {
         if (live.image != null) {
@@ -390,14 +460,14 @@ private fun LiveFrame(state: TetherUiState, onAction: (TetherUiAction) -> Unit, 
             live.starting && live.image == null -> LiveStatus("正在启动实时预览…", busy = true)
             live.switchingFormat -> LiveStatus("正在切换预览分辨率…", busy = true)
             live.error != null -> Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(live.error, fontSize = 12.sp, color = Color.White.copy(alpha = .8f))
+                Text(live.error, fontSize = 12.sp, color = colors.onSurface.copy(alpha = .8f))
                 TextButton("重试", { onAction(TetherUiAction.RetryLiveView) })
             }
             !live.running && live.image == null -> LiveStatus("实时预览未启动")
             live.frozen -> LiveStatus("画面已冻结")
         }
         if (live.filterEnabled && live.filterAvailable) {
-            Box(Modifier.fillMaxSize().background(Color(0x143482FF)))
+            Box(Modifier.fillMaxSize().background(MiuixTheme.colorScheme.primary.copy(alpha = .10f)))
         }
         if (live.isRecording) {
             Row(
@@ -408,8 +478,8 @@ private fun LiveFrame(state: TetherUiState, onAction: (TetherUiAction) -> Unit, 
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(5.dp),
             ) {
-                Box(Modifier.size(6.dp).clip(CircleShape).background(Color(0xFFFF3B30)))
-                Text(formatTetherTime(live.recordingElapsedMillis), fontSize = 10.sp, color = Color.White)
+                Box(Modifier.size(6.dp).clip(CircleShape).background(MiuixTheme.colorScheme.error))
+                Text(formatTetherTime(live.recordingElapsedMillis), fontSize = 10.sp, color = colors.onSurface)
             }
         }
     }
@@ -417,22 +487,24 @@ private fun LiveFrame(state: TetherUiState, onAction: (TetherUiAction) -> Unit, 
 
 @Composable
 private fun LiveStatus(text: String, busy: Boolean = false) {
+    val colors = liveColors()
     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (busy) CircularProgressIndicator(modifier = Modifier.size(24.dp))
-        Text(text, fontSize = 12.sp, color = Color.White.copy(alpha = .72f))
+        Text(text, fontSize = 12.sp, color = colors.onSurface.copy(alpha = .72f))
     }
 }
 
 @Composable
 private fun ShutterButton(state: TetherUiState, onAction: (TetherUiAction) -> Unit, size: androidx.compose.ui.unit.Dp) {
+    val colors = liveColors()
     val live = state.liveView
     val enabled = !live.captureBusy && state.capabilities.let { caps ->
         (live.isVideoMode && caps.canRecord) || (!live.isVideoMode && caps.canCapture)
     }
     Box(
         Modifier.size(size).clip(CircleShape)
-            .border(3.dp, Color.White.copy(alpha = if (enabled) .9f else .4f), CircleShape)
-            .background(Color.White.copy(alpha = .12f))
+            .border(3.dp, colors.onSurface.copy(alpha = if (enabled) .9f else .4f), CircleShape)
+            .background(colors.onSurface.copy(alpha = .12f))
             .clickable(enabled = enabled) {
                 if (live.isVideoMode) onAction(TetherUiAction.ToggleRecording) else onAction(TetherUiAction.Capture)
             },
@@ -441,18 +513,19 @@ private fun ShutterButton(state: TetherUiState, onAction: (TetherUiAction) -> Un
         if (live.captureBusy) {
             CircularProgressIndicator(modifier = Modifier.size(size / 2))
         } else if (live.isRecording) {
-            Box(Modifier.size(size * .34f).clip(RoundedCornerShape(size * .1f)).background(Color(0xFFFF3B30)))
+            Box(Modifier.size(size * .34f).clip(RoundedCornerShape(size * .1f)).background(MiuixTheme.colorScheme.error))
         } else {
-            Box(Modifier.size(size * .74f).clip(CircleShape).background(Color.White.copy(alpha = .92f)))
+            Box(Modifier.size(size * .74f).clip(CircleShape).background(colors.onSurface.copy(alpha = .92f)))
         }
     }
 }
 
 @Composable
 private fun LiveSwitchColumn(state: TetherUiState, onAction: (TetherUiAction) -> Unit, modifier: Modifier) {
+    val colors = liveColors()
     val live = state.liveView
     Column(
-        modifier.clip(RoundedCornerShape(14.dp)).background(Color.White.copy(alpha = .08f)).padding(3.dp),
+        modifier.clip(RoundedCornerShape(14.dp)).background(colors.container).padding(3.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         LiveSwitchPill("回传", live.autoDownload, Modifier.fillMaxWidth().weight(1f), enabled = live.autoDownloadAvailable, compact = true) {
@@ -476,6 +549,7 @@ private fun LiveSwitchPill(
     compact: Boolean = false,
     onClick: () -> Unit,
 ) {
+    val colors = liveColors()
     Box(
         modifier
             .height(if (compact) 20.dp else 26.dp)
@@ -489,9 +563,9 @@ private fun LiveSwitchPill(
             fontSize = if (compact) 10.5.sp else 11.sp,
             fontWeight = FontWeight.SemiBold,
             color = when {
-                !enabled -> Color.White.copy(alpha = .4f)
-                on -> Color.White
-                else -> Color.White.copy(alpha = .74f)
+                !enabled -> colors.onSurface.copy(alpha = .4f)
+                on -> MiuixTheme.colorScheme.onPrimary
+                else -> colors.onSurface.copy(alpha = .74f)
             },
         )
     }
@@ -505,55 +579,71 @@ private fun RailTool(
     enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
+    val colors = liveColors()
     Column(
         modifier.fillMaxWidth().clip(RoundedCornerShape(11.dp))
-            .background(Color.White.copy(alpha = .06f))
+            .background(colors.container)
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 5.dp),
     ) {
-        Text(label, fontSize = 9.sp, color = Color.White.copy(alpha = if (enabled) .5f else .3f), lineHeight = 11.sp)
+        Text(label, fontSize = 9.sp, color = colors.onSurface.copy(alpha = if (enabled) .5f else .3f), lineHeight = 11.sp)
         Text(
             value,
             fontSize = 12.5.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            color = Color.White.copy(alpha = if (enabled) 1f else .42f),
+            color = colors.onSurface.copy(alpha = if (enabled) 1f else .42f),
         )
     }
 }
 
 @Composable
-private fun QuickValue(label: String, value: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Column(modifier.clickable(onClick = onClick).padding(vertical = 6.dp)) {
-        Text(label, fontSize = 9.5.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+private fun QuickValue(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    val colors = liveColors()
+    Column(
+        modifier.clip(RoundedCornerShape(10.dp))
+            .background(colors.container)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 4.dp, vertical = 7.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(label, fontSize = 9.5.sp, maxLines = 1, color = colors.secondary)
         Text(
             value, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            color = MiuixTheme.colorScheme.onSurface,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            color = if (enabled) colors.onSurface else colors.secondary.copy(alpha = .5f),
         )
     }
 }
 
 @Composable
 private fun TabsRow(selected: Int, onSelect: (Int) -> Unit) {
+    val colors = liveColors()
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)
             .clip(RoundedCornerShape(12.dp))
-            .background(MiuixTheme.colorScheme.secondaryContainer)
+            .background(colors.container)
             .padding(3.dp),
         horizontalArrangement = Arrangement.spacedBy(3.dp),
     ) {
-        listOf("曝光", "色彩", "更多").forEachIndexed { index, title ->
+        listOf("档位", "格调", "更多").forEachIndexed { index, title ->
             Text(
                 title,
                 Modifier.weight(1f).clip(RoundedCornerShape(9.dp))
-                    .background(if (selected == index) MiuixTheme.colorScheme.surface else Color.Transparent)
+                    .background(if (selected == index) colors.onSurface.copy(alpha = .16f) else Color.Transparent)
                     .clickable { onSelect(index) }
                     .padding(vertical = 6.dp),
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                color = if (selected == index) MiuixTheme.colorScheme.onSurface else MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                color = if (selected == index) colors.onSurface else colors.secondary,
             )
         }
     }
@@ -565,33 +655,27 @@ private fun ExposurePane(state: TetherUiState, onAction: (TetherUiAction) -> Uni
     SectionLabel("档位 · 请拨动相机转盘")
     Text(
         state.parameters.modeLabel + (state.parameters.exposureSubMode?.let { " · $it" } ?: ""),
-        fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = MiuixTheme.colorScheme.onSurface,
+        fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = liveColors().onSurface,
         modifier = Modifier.padding(top = 2.dp),
     )
-    ParamRow("ISO", live.readout(TetherParameterKey.Iso, state)) { openPicker(LivePicker.Param(TetherParameterKey.Iso)) }
-    ParamRow(
-        "快门", live.readout(TetherParameterKey.Shutter, state),
-        enabled = live.shutterWritable(state),
-        valueColor = if (live.shutterWritable(state)) null else MiuixTheme.colorScheme.onSurfaceVariantSummary,
-    ) { openPicker(LivePicker.Param(TetherParameterKey.Shutter)) }
+    // 光圈 / 快门 / ISO / EV 常驻面板顶部，这里不再重复，只保留提示。
     if (!live.shutterWritable(state)) {
         Text(
             if (live.isVideoMode) "录像时由相机决定快门" else "当前档位由相机自动决定快门",
-            fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            fontSize = 11.sp, color = liveColors().secondary,
+            modifier = Modifier.padding(top = 6.dp),
         )
     }
-    ParamRow("曝光补偿", live.readout(TetherParameterKey.ExposureCompensation, state)) {
-        openPicker(LivePicker.Param(TetherParameterKey.ExposureCompensation))
-    }
-    ParamRow("光圈", live.readout(TetherParameterKey.Aperture, state), enabled = false)
+    Text(
+        "点按顶部数值即可调节，也可以拨动相机机身转盘。",
+        fontSize = 11.sp, color = liveColors().secondary,
+        modifier = Modifier.padding(top = 6.dp),
+    )
 }
 
 @Composable
 private fun ColorPane(state: TetherUiState, onAction: (TetherUiAction) -> Unit, openPicker: (LivePicker) -> Unit) {
-    val live = state.liveView
-    ParamRow("白平衡", live.readout(TetherParameterKey.WhiteBalance, state)) {
-        openPicker(LivePicker.Param(TetherParameterKey.WhiteBalance))
-    }
+    // 白平衡常驻面板顶部，这里只放格调相关设置。
     ParamRow(
         "照片格调", state.parameters.photoStyle?.toString() ?: "—",
     ) { openPicker(LivePicker.PhotoStyle) }
@@ -600,26 +684,27 @@ private fun ColorPane(state: TetherUiState, onAction: (TetherUiAction) -> Unit, 
     }
     Text(
         "格调由相机侧应用，实时预览画面不会随格调变化。",
-        fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        fontSize = 11.sp, color = liveColors().secondary,
         modifier = Modifier.padding(top = 4.dp),
     )
 }
 
 @Composable
 private fun MorePane(state: TetherUiState, onAction: (TetherUiAction) -> Unit, openPicker: (LivePicker) -> Unit) {
+    val colors = liveColors()
     val live = state.liveView
     SectionLabel("预览分辨率")
-    LiveFormatStack(state, onAction, modifier = Modifier.fillMaxWidth(), align = Alignment.Start, pillHeight = 34.dp, pillFontSize = 12.sp, onDark = false, openPicker = openPicker)
+    LiveFormatStack(state, onAction, modifier = Modifier.fillMaxWidth(), align = Alignment.Start, pillHeight = 34.dp, pillFontSize = 12.sp, onDark = true, openPicker = openPicker)
     live.formats.getOrNull(live.selectedFormatIndex)?.let { format ->
         Text(
             listOfNotNull(format.dimensions, format.note).joinToString(" · "),
-            fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            fontSize = 11.sp, color = colors.secondary,
             modifier = Modifier.padding(top = 4.dp),
         )
     }
     Text(
         "所有预览分辨率均可使用滤镜。",
-        fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        fontSize = 11.sp, color = colors.secondary,
     )
     ParamRow("目标帧率", "${live.targetFps} fps") { openPicker(LivePicker.TargetFps) }
     SectionLabel("回传")
@@ -627,7 +712,7 @@ private fun MorePane(state: TetherUiState, onAction: (TetherUiAction) -> Unit, o
         onAction(TetherUiAction.SetAutoDownload(!live.autoDownload))
     }
     live.autoDownloadReason?.let {
-        Text(it, fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+        Text(it, fontSize = 11.sp, color = colors.secondary)
     }
     ToggleRow("滤镜直出", state.directFilter, state.directFilterAvailable) {
         onAction(TetherUiAction.SetDirectFilter(!state.directFilter))
@@ -635,12 +720,12 @@ private fun MorePane(state: TetherUiState, onAction: (TetherUiAction) -> Unit, o
     Text(
         if (state.directFilter) "回传的照片会按主页全局滤镜另存一张成品到主页输出文件夹。"
         else "只回传相机原片，不套滤镜。",
-        fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        fontSize = 11.sp, color = colors.secondary,
     )
-    state.directFilterReason?.let { Text(it, fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary) }
+    state.directFilterReason?.let { Text(it, fontSize = 11.sp, color = colors.secondary) }
     state.cameraDetails?.let {
         SectionLabel("相机")
-        Text(it, fontSize = 12.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+        Text(it, fontSize = 12.sp, color = colors.secondary)
     }
 }
 
@@ -656,6 +741,7 @@ private fun LiveFormatStack(
     onDark: Boolean = true,
     openPicker: ((LivePicker) -> Unit)? = null,
 ) {
+    val colors = liveColors()
     val live = state.liveView
     val canSwitch = state.capabilities.canSwitchLiveViewFormat && !live.switchingFormat && !live.isRecording
     val shape = RoundedCornerShape(if (boxed) 10.dp else 8.dp)
@@ -665,7 +751,7 @@ private fun LiveFormatStack(
         modifier
             .then(
                 if (boxed) {
-                    Modifier.clip(RoundedCornerShape(14.dp)).background(Color.White.copy(alpha = .08f)).padding(3.dp)
+                    Modifier.clip(RoundedCornerShape(14.dp)).background(colors.container).padding(3.dp)
                 } else {
                     Modifier
                 },
@@ -681,7 +767,7 @@ private fun LiveFormatStack(
                     .clip(shape)
                     .background(
                         when {
-                            selected && onDark -> Color.White.copy(alpha = .92f)
+                            selected && onDark -> colors.onSurface.copy(alpha = .92f)
                             selected -> MiuixTheme.colorScheme.primary
                             else -> Color.Transparent
                         },
@@ -689,7 +775,7 @@ private fun LiveFormatStack(
                     .then(
                         if (selected) Modifier else Modifier.border(
                             1.dp,
-                            if (onDark) Color.White.copy(alpha = .16f) else MiuixTheme.colorScheme.onSurface.copy(alpha = .16f),
+                            if (onDark) colors.hairline else colors.onSurface.copy(alpha = .16f),
                             shape,
                         ),
                     )
@@ -704,10 +790,10 @@ private fun LiveFormatStack(
                     overflow = TextOverflow.Ellipsis,
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                     color = when {
-                        selected && onDark -> Color(0xFF111111)
-                        selected -> Color.White
-                        onDark -> Color.White.copy(alpha = if (canSwitch) .8f else .4f)
-                        else -> MiuixTheme.colorScheme.onSurface.copy(alpha = if (canSwitch) .8f else .4f)
+                        selected && onDark -> colors.rail
+                        selected -> colors.onSurface
+                        onDark -> colors.onSurface.copy(alpha = if (canSwitch) .8f else .4f)
+                        else -> colors.onSurface.copy(alpha = if (canSwitch) .8f else .4f)
                     },
                 )
             }
@@ -723,42 +809,44 @@ private fun ParamRow(
     valueColor: Color? = null,
     onClick: () -> Unit = {},
 ) {
+    val colors = liveColors()
     Row(
         Modifier.fillMaxWidth()
             .clickable(enabled = enabled, onClick = onClick)
             .padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, fontSize = 14.sp, color = MiuixTheme.colorScheme.onSurface)
+        Text(label, fontSize = 14.sp, color = colors.onSurface)
         Spacer(Modifier.weight(1f))
         Text(
             value, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
-            color = valueColor ?: if (enabled) MiuixTheme.colorScheme.onSurface else MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            color = valueColor ?: if (enabled) colors.onSurface else colors.secondary,
         )
     }
 }
 
 @Composable
 private fun ToggleRow(label: String, on: Boolean, available: Boolean, onClick: () -> Unit) {
+    val colors = liveColors()
     Row(
         Modifier.fillMaxWidth().clickable(enabled = available, onClick = onClick).padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, fontSize = 14.sp, color = MiuixTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
+        Text(label, fontSize = 14.sp, color = colors.onSurface, modifier = Modifier.weight(1f))
         Box(
             Modifier.size(width = 40.dp, height = 24.dp).clip(RoundedCornerShape(12.dp))
                 .background(
                     when {
-                        !available -> MiuixTheme.colorScheme.secondaryContainer
+                        !available -> colors.container
                         on -> MiuixTheme.colorScheme.primary
-                        else -> MiuixTheme.colorScheme.secondaryContainer
+                        else -> colors.container
                     },
                 ),
             contentAlignment = if (on) Alignment.CenterEnd else Alignment.CenterStart,
         ) {
             Box(
                 Modifier.padding(2.dp).size(20.dp).clip(CircleShape)
-                    .background(if (on) Color.White else MiuixTheme.colorScheme.surface),
+                    .background(if (on) colors.onSurface else colors.surface),
             )
         }
     }
@@ -766,12 +854,13 @@ private fun ToggleRow(label: String, on: Boolean, available: Boolean, onClick: (
 
 @Composable
 private fun SectionLabel(text: String) {
+    val colors = liveColors()
     Text(
         text,
         Modifier.padding(top = 12.dp, bottom = 2.dp),
         fontSize = 11.sp,
         fontWeight = FontWeight.SemiBold,
-        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        color = colors.secondary,
     )
 }
 
